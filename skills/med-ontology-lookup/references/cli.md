@@ -68,6 +68,7 @@ Friendly names (`SNOMEDCT`, `SNOMED`, `LOINC`) are normalized to UMLS SABs on th
 | `RID` + digits | RadLex | `RID43255` |
 | `FMA:digits` / `FMA_digits` | FMA | `FMA:7088` |
 | 6–18 digit integer | Likely SNOMED | `36118008` |
+| `digits-digits` | LOINC | `8867-4` |
 | Multi-word / plain word | Term | `ground glass opacity` |
 
 ## Env vars
@@ -75,7 +76,10 @@ Friendly names (`SNOMEDCT`, `SNOMED`, `LOINC`) are normalized to UMLS SABs on th
 ```bash
 export BIOPORTAL_API_KEY=...   # or BIOONTOLOGY_API_KEY
 export UMLS_API_KEY=...
+# or: uv run --env-file=.env molu …
 ```
+
+The tool reads the process environment only; it does not open `.env`.
 
 Optional: `BIOPORTAL_BASE_URL`, `UMLS_BASE_URL`, `UMLS_VERSION` (default `current`).
 

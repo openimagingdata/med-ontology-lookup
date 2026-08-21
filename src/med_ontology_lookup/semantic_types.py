@@ -222,17 +222,6 @@ def list_shorthand_types() -> list[tuple[str, list[str], str]]:
     return rows
 
 
-def format_semantic_types_help() -> str:
-    """Short help note pointing at --print-types (no T-code dump)."""
-    primaries = ", ".join(primary for primary, _, _ in list_shorthand_types())
-    return (
-        "Filter with -t / --semantic-types using short-hands "
-        f"(e.g. disease, finding, anatomy).\n"
-        f"Short-hands: {primaries}\n"
-        "See the full table:  molu search --print-types"
-    )
-
-
 @lru_cache(maxsize=1)
 def _tui_to_primary_shorthand() -> dict[str, str]:
     """Map TUI → preferred short-hand when we have one."""

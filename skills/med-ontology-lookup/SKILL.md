@@ -18,9 +18,10 @@ in Python) for term/code lookups. Do not scrape BioPortal/UTS UIs.
 
 - From the repo root, prefer: `uv run molu …` (installs/uses the project env).
 - Or: `uv sync --extra dev` then `molu` on PATH.
-- Env vars (at least one):
+- Env vars (at least one) must already be in the process environment. The tool does not load `.env`.
   - `BIOPORTAL_API_KEY` (or `BIOONTOLOGY_API_KEY`) — [BioPortal account](https://bioportal.bioontology.org/account)
   - `UMLS_API_KEY` — [UTS profile](https://uts.nlm.nih.gov/uts/profile) (UMLS license required)
+  - To inject a file: `uv run --env-file=.env molu …`
 
 If a command fails with a missing-key error, tell the user which key to set.
 

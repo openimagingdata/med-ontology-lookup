@@ -42,6 +42,10 @@ class SearchResults(BaseModel):
     total_count: int | None = None
     results: list[SearchHit]
     backend: Backend | None = None
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Partial-failure notes (one backend or ontology failed; others succeeded)",
+    )
 
 
 class Concept(BaseModel):

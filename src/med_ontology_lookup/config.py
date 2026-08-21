@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import AliasChoices, Field, SecretStr
+import os
+
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # BioPortal ontology acronyms used by default for radiology/anatomy work.
@@ -41,9 +43,9 @@ class Settings(BaseSettings):
     """Runtime settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
         extra="ignore",
+        # Empty BIOPORTAL_API_KEY= must not block BIOONTOLOGY_API_KEY.
+        env_ignore_empty=True,
     )
 
     bioportal_api_key: SecretStr | None = Field(
@@ -62,15 +64,35 @@ class Settings(BaseSettings):
     umls_version: str = "current"
     http_timeout: float = 30.0
 
+    @field_validator("bioportal_api_key", mode="before")
+    @classmethod
+    def _blank_bioportal_falls_back(cls, value: object) -> object:
+        """Treat empty BIOPORTAL_API_KEY as unset so BIOONTOLOGY_API_KEY can apply."""
+        if value is not None and str(value).strip():
+            return value
+        alt = os.getenv("BIOONTOLOGY_API_KEY")
+        if alt and alt.strip():
+            return alt.strip()
+        return None
+
+    @field_validator("umls_api_key", mode="before")
+    @classmethod
+    def _blank_umls_is_unset(cls, value: object) -> object:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value
+
     def bioportal_key(self) -> str | None:
         if self.bioportal_api_key is None:
             return None
-        return self.bioportal_api_key.get_secret_value()
+        val = self.bioportal_api_key.get_secret_value().strip()
+        return val or None
 
     def umls_key(self) -> str | None:
         if self.umls_api_key is None:
             return None
-        return self.umls_api_key.get_secret_value()
+        val = self.umls_api_key.get_secret_value().strip()
+        return val or None
 
 
 @lru_cache

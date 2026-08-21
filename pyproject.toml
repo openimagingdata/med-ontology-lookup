@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "med-ontology-lookup"
-version = "0.1.1"
-description = "Lookup medical terms in RadLex, SNOMED-CT, FMA, and UMLS via BioPortal and UMLS REST APIs"
+version = "0.1.2"
+description = "Lookup medical terms in RadLex, SNOMED-CT, FMA, LOINC, and UMLS via BioPortal and UMLS REST APIs"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

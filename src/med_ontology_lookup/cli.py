@@ -17,6 +17,7 @@ from med_ontology_lookup.models import (
     HierarchyNode,
     SearchResults,
 )
+from med_ontology_lookup.http_util import format_http_error, redact_secrets
 from med_ontology_lookup.semantic_types import display_semantic_types, list_shorthand_types
 from med_ontology_lookup.service import OntologyLookup
 
@@ -117,6 +118,8 @@ def _print_search_table(results: SearchResults) -> None:
     console.print(table)
     if results.total_count is not None:
         console.print(f"[dim]{len(results.results)} shown (total≈{results.total_count})[/dim]")
+    for warning in results.warnings:
+        err_console.print(f"[yellow]Warning:[/yellow] {warning}")
 
 
 def _print_concept(concept: Concept) -> None:
@@ -174,21 +177,20 @@ def _print_hierarchy(nodes: list[HierarchyNode], title: str) -> None:
 
 def _handle_errors(exc: BaseException) -> None:
     if isinstance(exc, ValueError):
-        err_console.print(f"[red]Error:[/red] {exc}")
+        err_console.print(f"[red]Error:[/red] {redact_secrets(str(exc))}")
         raise typer.Exit(code=2) from exc
-    # httpx.HTTPStatusError — include response body when present (BioPortal error JSON)
     response = getattr(exc, "response", None)
     if response is not None:
         detail = ""
         try:
-            detail = response.text
+            detail = redact_secrets(response.text)
         except Exception:  # noqa: BLE001
             detail = ""
-        err_console.print(f"[red]HTTP {response.status_code}:[/red] {exc}")
+        err_console.print(f"[red]HTTP {format_http_error(exc)}[/red]")
         if detail:
             err_console.print(f"[dim]{detail[:500]}[/dim]")
         raise typer.Exit(code=1) from exc
-    err_console.print(f"[red]{type(exc).__name__}:[/red] {exc}")
+    err_console.print(f"[red]{type(exc).__name__}:[/red] {redact_secrets(str(exc))}")
     raise typer.Exit(code=1) from exc
 
 
@@ -324,7 +326,7 @@ def crosswalk_cmd(
     to_sources: Optional[str] = typer.Option(
         None,
         "--to-sources",
-        help="Comma-separated target SABs (default: SNOMEDCT_US,FMA,RADLEX)",
+        help="Comma-separated target SABs (default: SNOMEDCT_US,FMA,RADLEX,LNC)",
     ),
     output: OutputFormat = typer.Option(OutputFormat.table, "--output", "-f"),
 ) -> None:

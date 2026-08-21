@@ -15,6 +15,7 @@ from med_ontology_lookup.config import (
     Settings,
     get_settings,
 )
+from med_ontology_lookup.http_util import format_http_error
 from med_ontology_lookup.detect import InputKind, detect_input
 from med_ontology_lookup.models import (
     Backend,
@@ -102,9 +103,7 @@ class OntologyLookup:
             return [Backend.BIOPORTAL]
         if choice == "umls":
             return [Backend.UMLS]
-        # "both" and "auto": use every configured backend.
-        # auto used to prefer BioPortal alone, which hid UMLS CUIs whenever
-        # BIOPORTAL_API_KEY was set — not what callers expect from a dual-API tool.
+        # auto == both: every backend that has a key
         if choice in ("both", "auto"):
             backends: list[Backend] = []
             if self._has_bioportal():
@@ -142,7 +141,10 @@ class OntologyLookup:
             that have a matching type; untyped hits are dropped.
         """
         backends = self._resolve_backends(backend)
-        onts = [o.upper() for o in (ontologies or list(DEFAULT_BIOPORTAL_ONTOLOGIES))]
+        onts = [
+            UMLS_SAB_TO_BIOPORTAL.get(o.upper(), o.upper())
+            for o in (ontologies or list(DEFAULT_BIOPORTAL_ONTOLOGIES))
+        ]
         stypes = resolve_semantic_types(semantic_types)
 
         # When allowing untyped hits, do not push the type filter to backends —
@@ -197,22 +199,23 @@ class OntologyLookup:
         merged: list[SearchHit] = []
         primary_backend: Backend | None = None
         errors: list[tuple[Backend, BaseException]] = []
+        warnings: list[str] = []
         for (b, _), result in zip(tasks, results_lists, strict=True):
             if isinstance(result, BaseException):
                 errors.append((b, result))
+                warnings.append(f"{b.value}: {format_http_error(result)}")
                 continue
             primary_backend = primary_backend or b
             if isinstance(result, SearchResults):
                 merged.extend(result.results)
+                warnings.extend(result.warnings)
             else:
-                # search_all / search_balanced returns list[SearchHit]
                 merged.extend(result)  # type: ignore[arg-type]
 
         if not merged and errors:
-            # Surface failures instead of returning a silent empty table.
             if len(errors) == 1:
                 raise errors[0][1]
-            parts = [f"{b.value}: {type(e).__name__}: {e}" for b, e in errors]
+            parts = [f"{b.value}: {format_http_error(e)}" for b, e in errors]
             raise RuntimeError("All search backends failed: " + "; ".join(parts))
 
         # Deduplicate by (backend, concept_id)
@@ -243,6 +246,7 @@ class OntologyLookup:
             total_count=len(unique),
             results=ordered,
             backend=primary_backend if len(backends) == 1 else None,
+            warnings=warnings,
         )
 
     @staticmethod

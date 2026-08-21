@@ -50,3 +50,24 @@ src/med_ontology_lookup/
 - Crosswalk no longer falls back to all preferred atoms when `to_sources` is empty for that filter.
 - `_short_code` prefers URI fragments over path segments.
 - LOINC/digit-leading compact codes recognized by `detect_input` (e.g. `8867-4`).
+
+### 2026-08-16 — review follow-up
+
+- WIP commit `8dd0a08`, then: redact `apiKey` in errors; `_class_exists` raises on auth/rate-limit/5xx; no cache of resolve misses; exact IRI/code match only; search SAB→BioPortal map; `SearchResults.warnings`; blank API keys treated as unset (`env_ignore_empty`).
+- Confidence tests: SAB mapping, partial-ontology warnings, Settings alias fallback, resolve suffix false-positive.
+- Settings no longer auto-load `.env`; keys come from the process environment (`uv run --env-file=.env` if needed).
+
+### 2026-08-16 — product and graph roadmap research
+
+- Position the package as an agent-ready medical terminology graph gateway, not an ontology repository or general graph database.
+- Sequence reliability and version/provenance contracts before bounded graph traversal, typed mappings, similarity, or local graph analytics.
+- Recommend native MCP tools/resources, domain profiles, text annotation and batch operations, a common node/edge envelope, FHIR terminology semantics, and SSSOM-compatible mapping evidence.
+- Keep OLS/OAK/Snowstorm/FHIR servers as adapters or optional backends instead of rebuilding their storage and reasoning machinery.
+
+### 2026-08-17 — profile defaults (roadmap)
+
+- Default profile is **`radiology`**: RadLex + LOINC (Playbook-weighted) + SNOMED CT + FMA; UMLS as hub.
+- LOINC/RSNA Radiology Playbook is first-class for orderables; findings/anatomy stay RadLex-led.
+- **`anatomy`** includes RadLex alongside FMA, Uberon, SNOMED.
+- ICD-10-CM/PCS: `clinical` / `billing-us` / explicit add-on — not radiology default.
+- CPT: UMLS-only, license-gated `billing-us`; BioPortal does not serve CPT.

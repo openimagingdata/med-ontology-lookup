@@ -117,6 +117,69 @@ def test_missing_key_raises():
         c._require_key()
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_class_exists_raises_on_auth_and_rate_limit(client: BioPortalClient):
+    iri = "http://www.radlex.org/RID/RID194"
+    respx.get(f"{BASE}/ontologies/RADLEX/classes/{quote(iri, safe='')}").mock(
+        return_value=httpx.Response(429, json={"errors": ["rate limited"]})
+    )
+    async with client:
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            await client._class_exists("RADLEX", iri)
+    assert exc.value.response.status_code == 429
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_resolve_does_not_cache_misses(client: BioPortalClient):
+    short = "RID99999"
+    iri = "http://www.radlex.org/RID/RID99999"
+    respx.get(f"{BASE}/ontologies/RADLEX/classes/{quote(short, safe='')}").mock(
+        return_value=httpx.Response(400, json={"errors": ["not a valid IRI"]})
+    )
+    respx.get(f"{BASE}/ontologies/RADLEX/classes/{quote(iri, safe='')}").mock(
+        return_value=httpx.Response(404, json={"errors": ["missing"]})
+    )
+    respx.get(f"{BASE}/search").mock(
+        return_value=httpx.Response(200, json={"collection": [], "totalCount": 0})
+    )
+    async with client:
+        first = await client.resolve_class_id("RADLEX", short)
+        assert first == short
+        assert ("RADLEX", short) not in client._resolve_cache
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_resolve_does_not_match_numeric_suffix(client: BioPortalClient):
+    """7088 must not resolve to fma17088 via endswith."""
+    short = "7088"
+    respx.get(url__regex=rf"{BASE}/ontologies/FMA/classes/.*").mock(
+        return_value=httpx.Response(404, json={"errors": ["missing"]})
+    )
+    respx.get(f"{BASE}/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "totalCount": 1,
+                "collection": [
+                    {
+                        "@id": "http://purl.org/sig/ont/fma/fma17088",
+                        "prefLabel": "unrelated",
+                        "notation": ["FMA:17088"],
+                        "links": {"ontology": f"{BASE}/ontologies/FMA", "ui": ""},
+                    }
+                ],
+            },
+        )
+    )
+    async with client:
+        resolved = await client.resolve_class_id("FMA", short)
+    assert resolved == short
+    assert "17088" not in resolved
+
+
 def test_short_code_prefers_fragment_over_path():
     assert _short_code("http://example.org/ontology.owl#Class") == "Class"
     assert _short_code("http://www.radlex.org/RID/RID194") == "RID194"

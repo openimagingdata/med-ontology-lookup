@@ -8,6 +8,7 @@ from urllib.parse import quote
 import httpx
 
 from med_ontology_lookup.config import DEFAULT_BIOPORTAL_ONTOLOGIES, Settings, get_settings
+from med_ontology_lookup.http_util import format_http_error
 from med_ontology_lookup.models import (
     Backend,
     Concept,
@@ -52,6 +53,11 @@ def _first_str(value: Any) -> str | None:
     if isinstance(value, list):
         return str(value[0]) if value else None
     return str(value)
+
+
+def _links_dict(item: dict[str, Any]) -> dict[str, Any]:
+    raw = item.get("links")
+    return raw if isinstance(raw, dict) else {}
 
 
 def _ontology_from_links(links: dict[str, Any] | None) -> str:
@@ -143,8 +149,8 @@ class BioPortalClient:
         return response.json()
 
     def _hit_from_item(self, item: dict[str, Any], query: str = "") -> SearchHit:
-        links = item.get("links") if isinstance(item.get("links"), dict) else {}
-        ontology = _ontology_from_links(links)  # type: ignore[arg-type]
+        links = _links_dict(item)
+        ontology = _ontology_from_links(links)
         concept_id = str(item.get("@id", ""))
         synonyms = _as_str_list(item.get("synonym"))
         pref_label = str(item.get("prefLabel") or "")
@@ -158,15 +164,15 @@ class BioPortalClient:
             definition=_first_str(item.get("definition")),
             semantic_types=_as_str_list(item.get("semanticType")),
             cui=cuis[0] if cuis else None,
-            ui_link=str(links.get("ui") or "") or None,  # type: ignore[union-attr]
+            ui_link=str(links.get("ui") or "") or None,
             backend=Backend.BIOPORTAL,
             exact_match=_exact_label_match(query, pref_label, synonyms) if query else False,
             raw=item,
         )
 
     def _concept_from_item(self, item: dict[str, Any], ontology: str | None = None) -> Concept:
-        links = item.get("links") if isinstance(item.get("links"), dict) else {}
-        ont = ontology or _ontology_from_links(links)  # type: ignore[arg-type]
+        links = _links_dict(item)
+        ont = ontology or _ontology_from_links(links)
         concept_id = str(item.get("@id", ""))
         return Concept(
             concept_id=concept_id,
@@ -178,7 +184,7 @@ class BioPortalClient:
             semantic_types=_as_str_list(item.get("semanticType")),
             cuis=_as_str_list(item.get("cui")),
             obsolete=item.get("obsolete") if isinstance(item.get("obsolete"), bool) else None,
-            ui_link=str(links.get("ui") or "") or None,  # type: ignore[union-attr]
+            ui_link=str(links.get("ui") or "") or None,
             backend=Backend.BIOPORTAL,
             raw=item,
         )
@@ -276,7 +282,7 @@ class BioPortalClient:
         require_exact_match: bool = False,
         semantic_types: list[str] | None = None,
         per_ontology: int | None = None,
-    ) -> list[SearchHit]:
+    ) -> SearchResults:
         """Search each ontology separately (in parallel) and merge.
 
         BioPortal's multi-ontology search ranks by global score, so a large
@@ -287,20 +293,26 @@ class BioPortalClient:
 
         onts = list(ontologies) if ontologies is not None else list(self.DEFAULT_ONTOLOGIES)
         if not onts:
-            return await self.search_all(
+            hits = await self.search_all(
                 query,
                 max_results=max_results,
                 ontologies=None,
                 require_exact_match=require_exact_match,
                 semantic_types=semantic_types,
             )
+            return SearchResults(
+                query=query, total_count=len(hits), results=hits, backend=Backend.BIOPORTAL
+            )
         if len(onts) == 1:
-            return await self.search_all(
+            hits = await self.search_all(
                 query,
                 max_results=max_results,
                 ontologies=onts,
                 require_exact_match=require_exact_match,
                 semantic_types=semantic_types,
+            )
+            return SearchResults(
+                query=query, total_count=len(hits), results=hits, backend=Backend.BIOPORTAL
             )
 
         # Fetch enough from each ontology to fill a balanced page.
@@ -321,9 +333,11 @@ class BioPortalClient:
 
         by_ont: dict[str, list[SearchHit]] = {ont: [] for ont in onts}
         errors: list[BaseException] = []
+        warnings: list[str] = []
         for ont, result in zip(onts, results, strict=True):
             if isinstance(result, BaseException):
                 errors.append(result)
+                warnings.append(f"{ont}: {format_http_error(result)}")
                 continue
             by_ont[ont] = result  # type: ignore[assignment]
 
@@ -355,7 +369,13 @@ class BioPortalClient:
                     break
             if not progressed:
                 break
-        return merged
+        return SearchResults(
+            query=query,
+            total_count=len(merged),
+            results=merged,
+            backend=Backend.BIOPORTAL,
+            warnings=warnings,
+        )
 
     def _candidate_iris(self, ontology: str, class_id: str) -> list[str]:
         """Build candidate full IRIs for a short code."""
@@ -392,7 +412,12 @@ class BioPortalClient:
             },
             headers=self._headers(),
         )
-        return response.status_code == 200
+        if response.status_code == 200:
+            return True
+        if response.status_code in {400, 404}:
+            return False
+        response.raise_for_status()
+        return False
 
     async def resolve_class_id(self, ontology: str, class_id: str) -> str:
         """Resolve a short code or IRI to a BioPortal class id (usually a full IRI).
@@ -414,41 +439,35 @@ class BioPortalClient:
             return cached
 
         for candidate in self._candidate_iris(ont, raw):
-            try:
-                if await self._class_exists(ont, candidate):
-                    self._resolve_cache[cache_key] = candidate
-                    return candidate
-            except httpx.HTTPError:
-                continue
+            if await self._class_exists(ont, candidate):
+                self._resolve_cache[cache_key] = candidate
+                return candidate
 
-        # Search fallback (notation / id match), including properties for RID-style ids
-        try:
-            results = await self.search(
-                raw,
-                ontologies=[ont],
-                page_size=25,
-                also_search_properties=True,
-                include="prefLabel,synonym,definition,semanticType,cui,notation",
-            )
-            needle = raw.casefold()
-            for hit in results.results:
-                short = hit.code.casefold()
-                if short == needle or short.endswith(needle) or hit.concept_id.rstrip("/").endswith(raw):
+        # Search fallback: exact short-code / notation / IRI-suffix match only
+        results = await self.search(
+            raw,
+            ontologies=[ont],
+            page_size=25,
+            also_search_properties=True,
+            include="prefLabel,synonym,definition,semanticType,cui,notation",
+        )
+        needle = raw.casefold()
+        for hit in results.results:
+            short = hit.code.casefold()
+            iri = hit.concept_id.rstrip("/")
+            if short == needle or iri.casefold().endswith("/" + needle) or iri.casefold().endswith("#" + needle):
+                self._resolve_cache[cache_key] = hit.concept_id
+                return hit.concept_id
+            raw_item = hit.raw or {}
+            notation = raw_item.get("notation")
+            notations = notation if isinstance(notation, list) else ([notation] if notation else [])
+            for n in notations:
+                nstr = str(n).casefold()
+                if nstr == needle or nstr.endswith(":" + needle):
                     self._resolve_cache[cache_key] = hit.concept_id
                     return hit.concept_id
-                # notation sometimes embeds the code
-                raw_item = hit.raw or {}
-                notation = raw_item.get("notation")
-                notations = notation if isinstance(notation, list) else ([notation] if notation else [])
-                for n in notations:
-                    if str(n).casefold() == needle or str(n).casefold().endswith(needle):
-                        self._resolve_cache[cache_key] = hit.concept_id
-                        return hit.concept_id
-        except httpx.HTTPError:
-            pass
 
-        # Last resort: return original (caller will surface API error)
-        self._resolve_cache[cache_key] = raw
+        # Do not cache misses — a later retry may succeed
         return raw
 
     async def get_class(self, ontology: str, class_id: str) -> Concept:

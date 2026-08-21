@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2 — 2026-08-16
+
+- Read API keys from the process environment only (no automatic `.env` load). Use `uv run --env-file=.env molu …` if you want a file.
+- Redact UMLS `apiKey` from CLI/HTTP error messages.
+- BioPortal class-existence checks raise on 401/429/5xx instead of treating them as missing; failed IRI resolutions are not cached.
+- Search maps UMLS SABs (`SNOMEDCT_US`, `LNC`) to BioPortal acronyms.
+- Partial backend/ontology failures print as warnings instead of disappearing.
+- Empty `BIOPORTAL_API_KEY=` no longer shadows `BIOONTOLOGY_API_KEY`.
+
 ## 0.1.1 — 2026-08-12
 
 - CLI entry point renamed to **`molu`** (use `uv run molu …`).

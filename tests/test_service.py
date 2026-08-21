@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from med_ontology_lookup.models import Concept, SearchResults
 from med_ontology_lookup.service import OntologyLookup
 
 BP = "https://data.bioontology.org"
@@ -38,7 +39,8 @@ async def test_lookup_term_searches_bioportal(mol: OntologyLookup):
     )
     async with mol:
         result = await mol.lookup("pneumothorax")
-    assert result.results[0].pref_label == "Pneumothorax"  # type: ignore[union-attr]
+    assert isinstance(result, SearchResults)
+    assert result.results[0].pref_label == "Pneumothorax"
 
 
 @respx.mock
@@ -61,8 +63,9 @@ async def test_lookup_cui_gets_umls(mol: OntologyLookup):
     )
     async with mol:
         result = await mol.lookup("C0032326")
-    assert result.pref_label == "Pneumothorax"  # type: ignore[union-attr]
-    assert result.code == "C0032326"  # type: ignore[union-attr]
+    assert isinstance(result, Concept)
+    assert result.pref_label == "Pneumothorax"
+    assert result.code == "C0032326"
 
 
 def test_no_keys_raises():
@@ -72,6 +75,77 @@ def test_no_keys_raises():
     empty._umls.api_key = None
     with pytest.raises(ValueError, match="No API keys"):
         empty._resolve_backends("auto")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_search_maps_snomedct_us_to_bioportal_acronym(mol: OntologyLookup):
+    route = respx.get(f"{BP}/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "totalCount": 0,
+                "pageCount": 1,
+                "page": 1,
+                "collection": [],
+            },
+        )
+    )
+    async with mol:
+        await mol.search("pneumothorax", ontologies=["SNOMEDCT_US"], backend="bioportal")
+    assert route.called
+    ontologies = route.calls.last.request.url.params.get("ontologies")
+    assert ontologies == "SNOMEDCT"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_search_maps_lnc_to_loinc(mol: OntologyLookup):
+    route = respx.get(f"{BP}/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={"totalCount": 0, "pageCount": 1, "page": 1, "collection": []},
+        )
+    )
+    async with mol:
+        await mol.search("bilirubin", ontologies=["LNC"], backend="bioportal")
+    assert route.calls.last.request.url.params.get("ontologies") == "LOINC"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_search_warns_when_one_ontology_fails(mol: OntologyLookup):
+    def handler(request: httpx.Request) -> httpx.Response:
+        onts = request.url.params.get("ontologies")
+        if onts == "SNOMEDCT":
+            return httpx.Response(500, json={"errors": ["boom"]})
+        return httpx.Response(
+            200,
+            json={
+                "totalCount": 1,
+                "pageCount": 1,
+                "page": 1,
+                "collection": [
+                    {
+                        "@id": "http://www.radlex.org/RID/RID1",
+                        "prefLabel": "ok",
+                        "synonym": [],
+                        "links": {"ontology": f"{BP}/ontologies/RADLEX", "ui": ""},
+                    }
+                ],
+            },
+        )
+
+    respx.get(f"{BP}/search").mock(side_effect=handler)
+    async with mol:
+        result = await mol.search(
+            "x",
+            ontologies=["RADLEX", "SNOMEDCT"],
+            backend="bioportal",
+        )
+    assert result.results
+    assert result.results[0].ontology == "RADLEX"
+    assert any("SNOMEDCT" in w for w in result.warnings)
 
 
 def test_interleave_preserves_source_order_within_ontology():

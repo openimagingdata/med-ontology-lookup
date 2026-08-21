@@ -9,7 +9,7 @@ Python library and CLI for looking up medical terms in **RadLex**, **SNOMED-CT**
 - **Get** a concept by CUI, RadLex RID, SNOMED code, or FMA id  
 - **Crosswalk** via UMLS CUIs to codes in other vocabularies  
 - **Parents / children** (one hop) for hierarchy checks  
-- **Semantic type filters by name** (`-t disease`, not just `T047`)  
+- **Semantic type filters by short-hand** (`-t disease` keeps untyped hits; `-T` requires a match)  
 - **Auto-detect** whether input is a term, code, or CUI (`molu lookup`)  
 - **Agent skill** under `skills/med-ontology-lookup/` (portable across agent runtimes)
 
@@ -33,12 +33,18 @@ Requires Python 3.11+.
 
 | Variable | Where to get it |
 |---|---|
-| `BIOPORTAL_API_KEY` | [BioPortal account](https://bioportal.bioontology.org/account) |
+| `BIOPORTAL_API_KEY` | [BioPortal account](https://bioportal.bioontology.org/account). `BIOONTOLOGY_API_KEY` is an alias. Leave the primary unset rather than empty. |
 | `UMLS_API_KEY` | [UTS profile](https://uts.nlm.nih.gov/uts/profile) (UMLS license) |
 
+Export them in the shell, or let uv inject a file (the tool does **not** read `.env` itself):
+
 ```bash
-cp .env.example .env
-# edit .env
+export BIOPORTAL_API_KEY=…
+export UMLS_API_KEY=…
+uv run molu search "pneumothorax"
+
+# or
+uv run --env-file=.env molu search "pneumothorax"
 ```
 
 You can use either key alone; crosswalk and CUI resolution need UMLS. Multi-ontology class search and BioPortal hierarchy need BioPortal. With both keys set, `molu search` (backend `auto`) queries **both** APIs and merges results.
@@ -117,4 +123,8 @@ This tool only calls remote APIs. **SNOMED CT** and **UMLS** content are subject
 
 ## Roadmap
 
-See [docs/plans/2026-08-11-v1-core-lookups.md](docs/plans/2026-08-11-v1-core-lookups.md). Follow-ons include text annotator, path-to-root, match scoring, and caching.
+See the [product and graph roadmap](docs/product-roadmap.md) for the recommended direction:
+an agent-ready terminology gateway with a **radiology default profile** (RadLex +
+LOINC/RSNA Playbook + SNOMED + FMA), bounded graph traversal, typed mappings,
+and native MCP tools. The completed v1 plan is
+in [docs/plans/2026-08-11-v1-core-lookups.md](docs/plans/2026-08-11-v1-core-lookups.md).
