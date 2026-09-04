@@ -71,3 +71,11 @@ src/med_ontology_lookup/
 - **`anatomy`** includes RadLex alongside FMA, Uberon, SNOMED.
 - ICD-10-CM/PCS: `clinical` / `billing-us` / explicit add-on — not radiology default.
 - CPT: UMLS-only, license-gated `billing-us`; BioPortal does not serve CPT.
+
+### 2026-09-03 — project review and authentication proxy proposal
+
+- Confirmed the v0.1 implementation as a sound lookup nucleus and prioritized contract hardening before MCP or broader graph work.
+- Proposed explicit `direct` and `delegated` provider authentication modes so the same lookup interface can use local API keys or a credential-injecting proxy such as Tailscale Aperture.
+- Kept proxy behavior at the HTTP/authentication seam: endpoint selection and credential handling change, while search, lookup, and graph semantics do not.
+- Identified UMLS user-license validation as a deployment gate for shared proxy credentials rather than assuming technical reachability implies license compliance.
+- Recorded release-readiness, agent workflow, and bounded graph phases in `docs/project-review-and-proposal.md`.

@@ -123,8 +123,11 @@ This tool only calls remote APIs. **SNOMED CT** and **UMLS** content are subject
 
 ## Roadmap
 
-See the [product and graph roadmap](docs/product-roadmap.md) for the recommended direction:
+Start with the [current project review and proposal](docs/project-review-and-proposal.md),
+which prioritizes contract hardening, delegated authentication through proxies such as
+Tailscale Aperture, release readiness, agent workflows, and bounded graph operations.
+The longer-term [product and graph roadmap](docs/product-roadmap.md) describes the target:
 an agent-ready terminology gateway with a **radiology default profile** (RadLex +
 LOINC/RSNA Playbook + SNOMED + FMA), bounded graph traversal, typed mappings,
-and native MCP tools. The completed v1 plan is
-in [docs/plans/2026-08-11-v1-core-lookups.md](docs/plans/2026-08-11-v1-core-lookups.md).
+and native MCP tools. The completed v1 plan is in
+[docs/plans/2026-08-11-v1-core-lookups.md](docs/plans/2026-08-11-v1-core-lookups.md).
