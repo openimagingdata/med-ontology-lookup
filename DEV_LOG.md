@@ -79,3 +79,10 @@ src/med_ontology_lookup/
 - Kept proxy behavior at the HTTP/authentication seam: endpoint selection and credential handling change, while search, lookup, and graph semantics do not.
 - Identified UMLS user-license validation as a deployment gate for shared proxy credentials rather than assuming technical reachability implies license compliance.
 - Recorded release-readiness, agent workflow, and bounded graph phases in `docs/project-review-and-proposal.md`.
+
+### 2026-09-05 — reviewed implementation backlog
+
+- Had the proposal and issue breakdown independently reviewed with `gpt-6-astra`, then incorporated its contract, sequencing, and security concerns.
+- Moved offline CI alongside typed provider-failure handling as parallel foundation work; separated live contracts and release publication into later explicit checkpoints.
+- Tightened delegated authentication so final outgoing requests cannot inherit client-side provider credentials and every paginated request remains under its Aperture connector prefix.
+- Created tracking issue [#1](https://github.com/openimagingdata/med-ontology-lookup/issues/1) and dependency-ordered implementation issues [#2–#12](https://github.com/openimagingdata/med-ontology-lookup/issues?q=is%3Aissue%20state%3Aopen%20sort%3Acreated-asc).

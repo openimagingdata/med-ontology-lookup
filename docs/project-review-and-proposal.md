@@ -1,6 +1,7 @@
 # Project review and proposal
 
 **Review date:** 2026-09-03
+**Backlog review:** 2026-09-05
 **Status:** proposed direction
 
 ## Executive recommendation
@@ -25,11 +26,12 @@ the hostname changed.
 
 The recommended sequence is therefore:
 
-1. harden existing behavior and result semantics;
-2. add direct-versus-delegated authentication at the HTTP seam;
-3. establish CI, live contract tests, and a published release;
-4. ship one coherent agent-ready slice; and
-5. add bounded graph operations only after the underlying contracts are trustworthy.
+1. establish offline CI while hardening provider failures and fallback behavior;
+2. make backend selection, identifiers, collections, provenance, and UMLS expansion honest;
+3. add direct-versus-delegated authentication, bounded diagnostics, and opt-in live checks;
+4. prepare a release, with publication as an explicit checkpoint;
+5. ship one coherent agent-ready slice; and
+6. add bounded graph operations only after the underlying contracts are trustworthy.
 
 ## What this product is
 
@@ -109,9 +111,16 @@ an exact search. During this review, a mocked BioPortal `401` was reproducibly c
 - a successful UMLS concept from `get` when both backends were configured.
 
 That behavior hides the event the caller most needs to understand. Fallback should occur only
-for typed, intentional conditions such as `not_found` or `unsupported_operation`. Authentication,
-authorization, licensing, rate limiting, upstream unavailability, and malformed responses must
-remain visible.
+when the adapter classifies an operation-specific response as an expected absence or unsupported
+operation. HTTP status alone is insufficient: for example, a provider concept `404` may mean
+absence while an Aperture connector-path `404` is a routing failure. Authentication,
+authorization, licensing, rate limiting, timeouts, connection failures, upstream unavailability,
+invalid JSON, and structurally invalid successful responses must remain visible with provider,
+operation, sanitized endpoint, and status origin when it is known.
+
+Only typed, expected provider failures should become partial-result warnings. Unexpected
+programming exceptions and task cancellation must propagate rather than being converted into
+normal provider outcomes by broad exception handling or `gather(return_exceptions=True)`.
 
 This becomes more important with Aperture: `401` or `403` can mean missing tailnet identity or
 an Aperture grant, `429` can be an Aperture quota, and `502` can mean the proxy cannot reach the
@@ -126,10 +135,14 @@ BioPortal likewise documents common `page`, `pagesize`, `nextPage`, and `prevPag
 Every collection operation needs one of two honest contracts:
 
 - iterate within caller-supplied bounds; or
-- return `truncated`, the applied limit, and a continuation cursor or next-page reference.
+- return `truncated`, the applied limit, and an honest continuation cursor or next-page reference
+  when the provider and merged result model can actually support one.
 
-The same rule should cover search, annotations, mappings, and later graph traversal. A plain list
-cannot communicate whether it is complete.
+The same rule should cover search, UMLS atom expansion, annotations, mappings, and later graph
+traversal. Envelopes must distinguish complete empty results, partial empty results, total failure,
+and capped results. Returned count, provider-reported total, and merged total are separate fields;
+the latter may be unknown. Pagination must stop safely on repeated pages, repeated cursors, or
+duplicate-only pages. A plain list cannot communicate whether it is complete.
 
 Sources: [UMLS source parents and children][umls-hierarchy] and
 [BioPortal API documentation][bioportal-api].
@@ -137,10 +150,14 @@ Sources: [UMLS source parents and children][umls-hierarchy] and
 #### 3. Crosswalk results overstate mapping certainty
 
 For free text, the UMLS adapter selects the first search result and continues without returning
-the rejected candidates or an ambiguity indicator. It then exposes source atoms sharing that CUI
-as a flat crosswalk.
+the rejected candidates or an ambiguity indicator. Source-code lookup can also resolve through
+more than one CUI. The adapter then exposes source atoms sharing the chosen CUI as a flat
+crosswalk, and free-text resolution currently reuses the expansion target filter as a search
+restriction even though these are different decisions.
 
-The replacement contract should distinguish:
+The immediate replacement contract should preserve candidate choices, make CUI selection
+explicit, separate resolution restrictions from expansion targets, and label the returned atoms
+as co-CUI evidence. A later mapping model should distinguish:
 
 - the candidate-resolution decision;
 - UMLS co-CUI membership;
@@ -149,9 +166,10 @@ The replacement contract should distinguish:
 - lexical suggestions; and
 - exact, broader, narrower, related, or unknown mapping predicates.
 
-Direction, source and target versions, provenance, justification, and confidence must travel with
-each mapping assertion. Until then, documentation and CLI copy should call the current result a
-UMLS co-CUI source-code expansion, not an unqualified equivalence mapping.
+Direction, source and target versions, provenance, justification, and confidence must eventually
+travel with each mapping assertion. Generic mappings, confidence scoring, and SSSOM-compatible
+output should remain a later milestone. Until then, documentation and CLI copy should call the
+current result a UMLS co-CUI source-code expansion, not an unqualified equivalence mapping.
 
 #### 4. Identifier and source normalization is not shared
 
@@ -163,10 +181,12 @@ identifier forms.
 #### 5. Result envelopes are not yet reproducible
 
 The current models do not consistently identify terminology edition/version, normalized input,
-retrieval time, source URL, applied limits, continuation state, or typed partial failures.
-`SearchResults.total_count` can mean the number of fetched unique candidates rather than the
-provider's total. These semantics need explicit names before agents or downstream software depend
-on them.
+retrieval time, source URL, applied limits, continuation state, or typed partial failures. A
+request for UMLS version `current` is a mutable alias, not an immutable release identifier;
+responses should distinguish requested release, resolved provider release when knowable, and the
+possibly distinct or unavailable source-vocabulary release. `SearchResults.total_count` can mean
+the number of fetched unique candidates rather than the provider's total. These semantics need
+explicit names before agents or downstream software depend on them.
 
 ### Delivery and maintenance gaps
 
@@ -239,15 +259,25 @@ The implementations are:
 
 - direct BioPortal authentication (`Authorization` header or documented query key);
 - direct UMLS authentication (`apiKey` query parameter); and
-- delegated authentication (a deliberate no-op).
+- delegated authentication, which actively guarantees that upstream credentials are absent.
 
 Backend selection must use provider readiness, not the mere presence of an API key. In delegated
 mode, the provider is eligible without a local secret. `molu doctor` should report endpoint,
 authentication mode, reachability, and capabilities without ever printing credentials.
 
-When delegated mode is active, local provider keys must never be attached to requests. If keys are
-also present in the environment, they should be ignored with a diagnostic so changing deployment
-mode cannot accidentally forward a secret in an `apiKey` query parameter.
+When delegated mode is active, local provider keys must never be attached to requests. This is
+stronger than making credential injection a no-op: final outgoing requests must also exclude
+provider credentials inherited from a caller-supplied `httpx` client's default headers,
+authentication callback, cookies, default query parameters, or credentials embedded in an
+endpoint URL. Unsafe inherited state should be rejected or stripped deterministically and covered
+by transport-level tests. If keys are also present in the environment, they should be ignored
+with a diagnostic so changing deployment mode cannot accidentally forward a secret in an
+`apiKey` query parameter.
+
+Every delegated request, including paginated requests, must remain under the configured connector
+prefix. Provider-supplied absolute next-page URLs must not bypass
+`/v1/connectors/<connector-id>`; pagination should reconstruct or validate the next request
+against the configured delegated endpoint.
 
 ### Tailscale Aperture deployment
 
@@ -311,7 +341,9 @@ Operational constraints to document and test:
 - callers need a valid Tailscale identity or an approved bridge arrangement;
 - Aperture is deny-by-default and missing grants return `403`;
 - connector IDs are alphanumeric and cannot contain hyphens;
-- query parameters are forwarded, so delegated mode must ensure local API keys are absent;
+- query parameters are forwarded, so delegated mode must ensure local and inherited API keys are
+  absent;
+- all request and pagination paths must remain under the configured connector prefix;
 - upstream redirects are blocked;
 - connector responses above 50 MB are silently truncated by Aperture; and
 - plain `http://` to the Aperture tailnet host is expected in the official examples because the
@@ -328,7 +360,9 @@ user behind a shared proxy.
 Before enabling a shared UMLS Aperture connector beyond an individually licensed or otherwise
 approved deployment, confirm the intended user-validation and source-vocabulary licensing model
 with NLM. `molu doctor` and the ontology catalog should report licensing requirements separately
-from technical reachability.
+from technical reachability. A diagnostic can report observed status and configuration, but a
+bare `403` cannot reliably identify whether the cause is Tailscale identity, an Aperture grant,
+upstream authorization, or licensing; explanations must remain bounded by the available evidence.
 
 Sources: [UMLS API authentication][umls-auth] and
 [validating UMLS licensees for third-party applications][umls-licensees].
@@ -345,58 +379,88 @@ Outcome: the repository has one executable plan and a visible backlog.
 - Keep `CHANGELOG.md` limited to released, externally visible differences; use `DEV_LOG.md` for
   engineering decisions and investigation notes.
 
-Exit criteria: every Phase 1 item has an issue, dependency order, and verification method.
+Exit criteria: every immediate item has an issue, dependency order, and verification method.
 
-### Phase 1: contract hardening
+### Phase 1: offline baseline and provider-failure contract
 
-Outcome: existing promises are trustworthy under success, absence, partial failure, and provider
-failure.
+Outcome: every change receives reproducible offline checks while provider failures stop becoming
+misleading fallback results.
 
-- Add a typed error taxonomy and status-aware fallback policy.
+- Add offline CI for supported Python versions, tests, the chosen and pinned Ruff policy, Pyright,
+  build validation, and package smoke installation.
+- Record the same commands in contributor documentation and keep them runnable from a clean
+  checkout.
+- Add a typed, operation-aware provider error taxonomy and fallback policy.
+- Preserve provider, operation, sanitized endpoint, HTTP status, and known status origin.
+- Propagate unexpected programming exceptions and cancellation.
+
+The offline CI and provider-failure work can proceed in parallel. Neither depends on live
+credentials.
+
+Exit criteria: a clean checkout passes the documented offline checks, and regression tests cover
+authentication, authorization, rate limits, not-found, malformed responses, timeouts, cancellation,
+partial failure, and proxy-versus-provider status ambiguity.
+
+### Phase 2: trustworthy lookup contracts
+
+Outcome: provider selection, identity, collections, provenance, and UMLS expansion are explicit
+enough for callers to interpret correctly.
+
+- Define backend selection per operation: `auto` selects eligible providers; explicit single
+  selection never silently uses another provider; explicit `both` requires both providers; and
+  unsupported selections fail before network access. Singular `get` should reject `both` unless a
+  future multi-result contract explicitly supports it.
+- Make readiness depend on endpoint and authentication configuration rather than key presence.
 - Centralize identifier/source normalization and resolution.
-- Distinguish `auto` from an explicit request for `both` providers.
 - Replace unbounded/plain list responses with bounded collection envelopes.
-- Correct total-count semantics and add typed warnings, truncation, and continuation metadata.
-- Add provider, terminology version, source URL, normalized input, and retrieval metadata.
-- Preserve ambiguity during term-to-CUI resolution.
-- Rename or enrich current crosswalk output so its evidence is explicit.
+- Correct returned/provider/merged count semantics and add typed per-source outcomes, warnings,
+  truncation, and continuation metadata without promising a resumable merged cursor prematurely.
+- Add requested and resolved provider release, source-vocabulary release when available, source
+  URL, normalized input, and retrieval metadata.
+- Preserve ambiguity during both term-to-CUI and source-code-to-CUI resolution.
+- Separate resolution restrictions from expansion targets and rename the current crosswalk output
+  as evidence-labeled UMLS co-CUI expansion.
 
-Exit criteria: regression tests cover authentication, authorization, rate limits, not-found,
-partial failure, ambiguous terms, source aliases, multi-page hierarchy, and truncation.
+Exit criteria: regression tests cover backend selection, source aliases, identity round trips,
+ambiguous terms and codes, multi-page hierarchy and atom expansion, repeated-page termination,
+empty/partial/failed collections, truncation, count meanings, and version uncertainty.
 
-### Phase 2: delegated authentication and diagnostics
+### Phase 3: delegated authentication, live contracts, and diagnostics
 
 Outcome: the same Python and CLI operations work directly or through Aperture without local
 provider keys.
 
 - Add typed direct/delegated endpoint settings and the internal authentication seam.
-- Make backend readiness depend on endpoint configuration and authentication mode.
-- Guarantee that delegated requests contain neither BioPortal authorization nor UMLS `apiKey`.
+- Guarantee that final delegated requests contain neither BioPortal authorization nor UMLS
+  `apiKey`, including credentials inherited from supplied HTTP clients or endpoint URLs.
+- Keep every delegated request and pagination step under the configured Aperture connector prefix.
 - Preserve proxy-originated statuses in the typed error model.
-- Add `molu doctor` checks for configuration, reachability, identity/grants, upstream health,
-  provider release visibility, and licensing notices.
+- Add separately gated, opt-in live provider and Aperture contract checks.
+- Add bounded `molu doctor` checks for configuration, reachability, observed statuses, provider
+  release visibility, and licensing notices without claiming unobservable root causes.
 - Document direct and Aperture configurations, including least-privilege grants and UMLS licensing.
 
 Exit criteria: the same mocked contract suite passes against direct and delegated transports, and
-opt-in live tests exercise both provider paths through a configured Aperture gateway.
+opt-in live checks can exercise both provider paths through a configured Aperture gateway without
+printing or forwarding client-side provider credentials.
 
-### Phase 3: release foundation
+### Phase 4: release preparation and publication checkpoint
 
 Outcome: users and agents can install a verified artifact rather than depending on a source
 checkout.
 
-- Add CI for supported Python versions, tests, Ruff, Pyright, build validation, and package smoke
-  installation.
-- Add separately gated live provider and Aperture contract tests.
 - Move development tools to a uv dependency group and pin the chosen quality-tool policy.
 - Add CLI integration coverage, including JSON output and exit codes.
 - Decide how the agent skill and reference docs are distributed with or alongside the package.
-- Tag, publish, and document the first release after the hardened contract is stable.
+- Prepare release notes and verify the artifact after the hardened contract is stable.
+- Make tagging, GitHub release creation, and package publication a deliberate checkpoint requiring
+  explicit release authority and the necessary credentials.
 
 Exit criteria: a clean checkout can run the documented development commands, CI enforces the same
-checks, and the published artifact supports the documented installation paths.
+checks, the candidate artifact supports the documented installation paths, and publication either
+has explicit approval or remains a clearly identified next action.
 
-### Phase 4: agent-ready terminology workflow
+### Phase 5: agent-ready terminology workflow
 
 Outcome: a fresh agent can discover and use the gateway safely.
 
@@ -409,7 +473,7 @@ Outcome: a fresh agent can discover and use the gateway safely.
 Exit criteria: an agent can discover availability, search or annotate, validate a selected
 concept, and explain any ambiguity or partial result without parsing console prose.
 
-### Phase 5: bounded graph context and typed mappings
+### Phase 6: bounded graph context and typed mappings
 
 Outcome: callers can ask useful relationship questions without turning the package into a graph
 database.
