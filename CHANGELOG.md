@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Provider authentication, authorization, rate-limit, upstream, transport, and malformed-response failures now raise typed library errors instead of triggering unrelated fallback or empty success.
+- Search partial results include structured provider failures alongside compatible warning text; a valid empty provider response still counts as a successful result.
+- JSON CLI provider errors now use a stable, credential-safe error envelope on stderr.
+
 ## 0.1.2 — 2026-08-16
 
 - Read API keys from the process environment only (no automatic `.env` load). Use `uv run --env-file=.env molu …` if you want a file.

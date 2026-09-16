@@ -6,9 +6,7 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _SECRET_QUERY_KEYS = frozenset({"apikey", "api_key", "token", "password", "secret"})
-_SECRET_QUERY_RE = re.compile(
-    r"(?i)((?:api[_-]?key|token|password|secret)=)([^&\s]+)"
-)
+_SECRET_QUERY_RE = re.compile(r"(?i)((?:api[_-]?key|token|password|secret)=)([^&\s]+)")
 
 
 def redact_secrets(text: str) -> str:
@@ -29,6 +27,20 @@ def sanitize_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
 
 
+def sanitize_endpoint(url: str) -> str:
+    """Return a credential-safe endpoint with no userinfo, query, or fragment."""
+    parts = urlsplit(url)
+    hostname = parts.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = f"{hostname}:{port}" if port is not None else hostname
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
 def format_http_error(exc: BaseException) -> str:
     """Status + method + sanitized URL; never include apiKey."""
     response = getattr(exc, "response", None)
@@ -40,7 +52,7 @@ def format_http_error(exc: BaseException) -> str:
         raw_url = str(getattr(request, "url", "") or "")
     elif response is not None:
         raw_url = str(getattr(response, "url", "") or "")
-    url = sanitize_url(raw_url) if raw_url else ""
+    url = sanitize_endpoint(raw_url) if raw_url else ""
     if status is not None:
         return " ".join(p for p in (str(status), method, url) if p)
-    return redact_secrets(f"{type(exc).__name__}: {exc}")
+    return type(exc).__name__

@@ -86,6 +86,7 @@ After `uv sync` / install, `molu` is also available on the environment PATH.
 import asyncio
 from med_ontology_lookup import OntologyLookup
 
+
 async def main():
     async with OntologyLookup() as mol:
         hits = await mol.search("pneumothorax", ontologies=["RADLEX", "SNOMEDCT"])
@@ -99,8 +100,62 @@ async def main():
         for sc in xwalk.source_codes:
             print(sc.source, sc.code, sc.name)
 
+
 asyncio.run(main())
 ```
+
+### Provider failures and fallback
+
+Remote failures use a stable library exception contract. `ProviderError` represents one failed
+provider call; `ProviderAggregateError` represents an operation in which every attempted provider
+call failed. Both inherit from `ProviderFailureError` and expose one or more credential-safe
+`ProviderFailure` records:
+
+```python
+from med_ontology_lookup import OntologyLookup, ProviderFailureError
+
+async with OntologyLookup() as mol:
+    try:
+        results = await mol.search("pneumothorax")
+    except ProviderFailureError as exc:
+        for failure in exc.failures:
+            print(failure.provider, failure.operation, failure.category, failure.http_status)
+```
+
+Fallback is limited to adapter-classified concept absence or an explicitly unsupported operation.
+Authentication, authorization, rate limits, upstream failures, transport failures, invalid JSON,
+and malformed successful responses remain visible to callers. A `404` at a custom provider or
+proxy endpoint is not assumed to mean that a concept is absent.
+
+When at least one concurrent search succeeds, the result remains usable even if it is empty.
+Partial failures are available as structured `SearchResults.failures`; the existing human-readable
+`SearchResults.warnings` field remains available. When every call fails, search raises
+`ProviderAggregateError`.
+
+With `--output json`, CLI provider errors are written to stderr with exit status 1:
+
+```json
+{
+  "error": {
+    "code": "provider_failure",
+    "message": "All attempted provider calls failed (1 failure)",
+    "failures": [
+      {
+        "provider": "bioportal",
+        "operation": "search",
+        "category": "authentication",
+        "endpoint": "https://data.bioontology.org/search",
+        "http_status": 401,
+        "status_origin": "unknown",
+        "ontology": "RADLEX"
+      }
+    ]
+  }
+}
+```
+
+Failure output excludes response bodies, URL credentials, query parameters, and exception chains
+that could retain provider credentials.
 
 ## Agent skill
 

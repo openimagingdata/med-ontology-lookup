@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import os
+from functools import lru_cache
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BIOPORTAL_BASE_URL = "https://data.bioontology.org"
+UMLS_BASE_URL = "https://uts-ws.nlm.nih.gov/rest"
 
 # BioPortal ontology acronyms used by default for radiology/anatomy work.
 DEFAULT_BIOPORTAL_ONTOLOGIES: tuple[str, ...] = ("RADLEX", "SNOMEDCT", "FMA", "LOINC")
@@ -59,8 +61,8 @@ class Settings(BaseSettings):
         validation_alias="UMLS_API_KEY",
         description="UMLS/UTS API key (https://uts.nlm.nih.gov/uts/profile)",
     )
-    bioportal_base_url: str = "https://data.bioontology.org"
-    umls_base_url: str = "https://uts-ws.nlm.nih.gov/rest"
+    bioportal_base_url: str = BIOPORTAL_BASE_URL
+    umls_base_url: str = UMLS_BASE_URL
     umls_version: str = "current"
     http_timeout: float = 30.0
 

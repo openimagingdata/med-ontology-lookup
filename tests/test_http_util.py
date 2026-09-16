@@ -1,7 +1,16 @@
 """Secret redaction in HTTP error messages."""
 
-from med_ontology_lookup.cli import _handle_errors
+import json
+
+from med_ontology_lookup.cli import OutputFormat, _handle_errors
+from med_ontology_lookup.errors import ProviderError
 from med_ontology_lookup.http_util import format_http_error, redact_secrets, sanitize_url
+from med_ontology_lookup.models import (
+    Backend,
+    FailureCategory,
+    ProviderFailure,
+    ProviderOperation,
+)
 
 
 def test_sanitize_url_strips_apikey():
@@ -41,10 +50,38 @@ def test_handle_errors_does_not_print_apikey(capsys):
         "GET",
         "https://uts-ws.nlm.nih.gov/rest/search/current?apiKey=super-secret",
     )
-    response = httpx.Response(401, request=request, text="unauthorized")
+    response = httpx.Response(
+        401,
+        request=request,
+        text='{"echoedAuthorization": "Bearer arbitrary-secret"}',
+    )
     exc = httpx.HTTPStatusError("boom", request=request, response=response)
     with pytest.raises(typer.Exit):
         _handle_errors(exc)
     captured = capsys.readouterr()
     assert "super-secret" not in captured.out
     assert "super-secret" not in captured.err
+    assert "arbitrary-secret" not in captured.err
+
+
+def test_handle_provider_error_prints_typed_json_to_stderr(capsys):
+    import pytest
+    import typer
+
+    exc = ProviderError(
+        ProviderFailure(
+            provider=Backend.UMLS,
+            operation=ProviderOperation.SEARCH,
+            category=FailureCategory.AUTHENTICATION,
+            endpoint="https://example.test/search",
+            http_status=401,
+        )
+    )
+    with pytest.raises(typer.Exit) as caught:
+        _handle_errors(exc, output=OutputFormat.json)
+    assert caught.value.exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["error"]["code"] == "provider_failure"
+    assert payload["error"]["failures"][0]["category"] == "authentication"

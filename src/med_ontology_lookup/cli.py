@@ -5,19 +5,20 @@ from __future__ import annotations
 import json
 import sys
 from enum import Enum
-from typing import Any, Optional
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from med_ontology_lookup.errors import ProviderFailureError
+from med_ontology_lookup.http_util import format_http_error, redact_secrets
 from med_ontology_lookup.models import (
     Concept,
     CrosswalkResult,
     HierarchyNode,
     SearchResults,
 )
-from med_ontology_lookup.http_util import format_http_error, redact_secrets
 from med_ontology_lookup.semantic_types import display_semantic_types, list_shorthand_types
 from med_ontology_lookup.service import OntologyLookup
 
@@ -72,7 +73,7 @@ def _print_types_table(*, output: OutputFormat = OutputFormat.table) -> None:
     )
 
 
-def _parse_list(value: Optional[str]) -> list[str] | None:
+def _parse_list(value: str | None) -> list[str] | None:
     if value is None or value.strip() == "":
         return None
     return [part.strip() for part in value.split(",") if part.strip()]
@@ -88,9 +89,7 @@ def _print_json(model: Any) -> None:
     if hasattr(model, "model_dump"):
         payload = model.model_dump(mode="json")
     elif isinstance(model, list):
-        payload = [
-            m.model_dump(mode="json") if hasattr(m, "model_dump") else m for m in model
-        ]
+        payload = [m.model_dump(mode="json") if hasattr(m, "model_dump") else m for m in model]
     else:
         payload = model
     console.print_json(json.dumps(payload, indent=2, default=str))
@@ -175,70 +174,84 @@ def _print_hierarchy(nodes: list[HierarchyNode], title: str) -> None:
         console.print("[yellow]No nodes returned.[/yellow]")
 
 
-def _handle_errors(exc: BaseException) -> None:
+def _handle_errors(
+    exc: BaseException,
+    *,
+    output: OutputFormat = OutputFormat.table,
+) -> None:
+    if isinstance(exc, ProviderFailureError):
+        if output == OutputFormat.json:
+            payload = {
+                "error": {
+                    "code": "provider_failure",
+                    "message": str(exc),
+                    "failures": [failure.model_dump(mode="json") for failure in exc.failures],
+                }
+            }
+            err_console.print_json(json.dumps(payload))
+        else:
+            err_console.print(f"[red]Provider error:[/red] {exc}")
+            for failure in exc.failures:
+                err_console.print(f"[dim]{failure.summary()}[/dim]")
+        raise typer.Exit(code=1) from None
     if isinstance(exc, ValueError):
         err_console.print(f"[red]Error:[/red] {redact_secrets(str(exc))}")
-        raise typer.Exit(code=2) from exc
+        raise typer.Exit(code=2) from None
     response = getattr(exc, "response", None)
     if response is not None:
-        detail = ""
-        try:
-            detail = redact_secrets(response.text)
-        except Exception:  # noqa: BLE001
-            detail = ""
         err_console.print(f"[red]HTTP {format_http_error(exc)}[/red]")
-        if detail:
-            err_console.print(f"[dim]{detail[:500]}[/dim]")
-        raise typer.Exit(code=1) from exc
-    err_console.print(f"[red]{type(exc).__name__}:[/red] {redact_secrets(str(exc))}")
-    raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=1) from None
+    err_console.print(f"[red]{type(exc).__name__}[/red]")
+    raise typer.Exit(code=1) from None
 
 
 @app.command("search", rich_help_panel="Lookups")
 def search_cmd(
-    query: Optional[str] = typer.Argument(
-        None, help="Free-text term or phrase (not required with --print-types)"
-    ),
-    ontologies: Optional[str] = typer.Option(
-        None,
-        "--ontologies",
-        "-o",
-        help="Comma-separated ontology acronyms (default: RADLEX,SNOMEDCT,FMA,LOINC)",
-    ),
-    backend: BackendOpt = typer.Option(BackendOpt.auto, "--backend", "-b"),
-    limit: int = typer.Option(25, "--limit", "-n", min=1, max=200),
-    exact: bool = typer.Option(False, "--exact", help="Require exact match"),
-    types: Optional[str] = typer.Option(
-        None,
-        "--types",
-        "-t",
-        help=(
-            "Filter by semantic type short-hand (comma-separated), "
-            "e.g. disease, finding, anatomy. Keeps hits with no type "
-            "(common for RadLex). List short-hands: --print-types"
+    query: Annotated[
+        str | None,
+        typer.Argument(help="Free-text term or phrase (not required with --print-types)"),
+    ] = None,
+    ontologies: Annotated[
+        str | None,
+        typer.Option(
+            "--ontologies",
+            "-o",
+            help="Comma-separated ontology acronyms (default: RADLEX,SNOMEDCT,FMA,LOINC)",
         ),
-    ),
-    types_strict: Optional[str] = typer.Option(
-        None,
-        "--types-strict",
-        "-T",
-        help=(
-            "Like --types, but drop hits with missing/empty types. "
-            "Only results that match the given type(s) are kept."
+    ] = None,
+    backend: Annotated[BackendOpt, typer.Option("--backend", "-b")] = BackendOpt.auto,
+    limit: Annotated[int, typer.Option("--limit", "-n", min=1, max=200)] = 25,
+    exact: Annotated[bool, typer.Option("--exact", help="Require exact match")] = False,
+    types: Annotated[
+        str | None,
+        typer.Option(
+            "--types",
+            "-t",
+            help=(
+                "Filter by semantic type short-hand (comma-separated), "
+                "e.g. disease, finding, anatomy. Keeps hits with no type "
+                "(common for RadLex). List short-hands: --print-types"
+            ),
         ),
-    ),
+    ] = None,
+    types_strict: Annotated[
+        str | None,
+        typer.Option(
+            "--types-strict",
+            "-T",
+            help=(
+                "Like --types, but drop hits with missing/empty types. "
+                "Only results that match the given type(s) are kept."
+            ),
+        ),
+    ] = None,
     # Backward-compatible alias for --types
-    semantic_types: Optional[str] = typer.Option(
-        None,
-        "--semantic-types",
-        hidden=True,
-    ),
-    print_types: bool = typer.Option(
-        False,
-        "--print-types",
-        help="Print a table of semantic type short-hands and exit",
-    ),
-    output: OutputFormat = typer.Option(OutputFormat.table, "--output", "-f"),
+    semantic_types: Annotated[str | None, typer.Option("--semantic-types", hidden=True)] = None,
+    print_types: Annotated[
+        bool,
+        typer.Option("--print-types", help="Print a table of semantic type short-hands and exit"),
+    ] = False,
+    output: Annotated[OutputFormat, typer.Option("--output", "-f")] = OutputFormat.table,
 ) -> None:
     """Search ontology terms across RadLex, SNOMED, FMA, LOINC, and UMLS."""
     if print_types:
@@ -277,7 +290,7 @@ def search_cmd(
     try:
         results = _run(_go())
     except Exception as exc:  # noqa: BLE001
-        _handle_errors(exc)
+        _handle_errors(exc, output=output)
         return
 
     if output == OutputFormat.json:
@@ -288,12 +301,15 @@ def search_cmd(
 
 @app.command("get")
 def get_cmd(
-    identifier: str = typer.Argument(..., help="CUI, code, or class id"),
-    ontology: Optional[str] = typer.Option(
-        None, "--ontology", "-o", help="Ontology/source (required for non-CUI without hint)"
-    ),
-    backend: BackendOpt = typer.Option(BackendOpt.auto, "--backend", "-b"),
-    output: OutputFormat = typer.Option(OutputFormat.table, "--output", "-f"),
+    identifier: Annotated[str, typer.Argument(help="CUI, code, or class id")],
+    ontology: Annotated[
+        str | None,
+        typer.Option(
+            "--ontology", "-o", help="Ontology/source (required for non-CUI without hint)"
+        ),
+    ] = None,
+    backend: Annotated[BackendOpt, typer.Option("--backend", "-b")] = BackendOpt.auto,
+    output: Annotated[OutputFormat, typer.Option("--output", "-f")] = OutputFormat.table,
 ) -> None:
     """Get a concept by CUI or source code."""
 
@@ -308,7 +324,7 @@ def get_cmd(
     try:
         concept = _run(_go())
     except Exception as exc:  # noqa: BLE001
-        _handle_errors(exc)
+        _handle_errors(exc, output=output)
         return
 
     if output == OutputFormat.json:
@@ -319,16 +335,19 @@ def get_cmd(
 
 @app.command("crosswalk")
 def crosswalk_cmd(
-    query: str = typer.Argument(..., help="CUI, source code, or term"),
-    from_source: Optional[str] = typer.Option(
-        None, "--from-source", help="Source SAB when query is a code (e.g. SNOMEDCT_US)"
-    ),
-    to_sources: Optional[str] = typer.Option(
-        None,
-        "--to-sources",
-        help="Comma-separated target SABs (default: SNOMEDCT_US,FMA,RADLEX,LNC)",
-    ),
-    output: OutputFormat = typer.Option(OutputFormat.table, "--output", "-f"),
+    query: Annotated[str, typer.Argument(help="CUI, source code, or term")],
+    from_source: Annotated[
+        str | None,
+        typer.Option("--from-source", help="Source SAB when query is a code (e.g. SNOMEDCT_US)"),
+    ] = None,
+    to_sources: Annotated[
+        str | None,
+        typer.Option(
+            "--to-sources",
+            help="Comma-separated target SABs (default: SNOMEDCT_US,FMA,RADLEX,LNC)",
+        ),
+    ] = None,
+    output: Annotated[OutputFormat, typer.Option("--output", "-f")] = OutputFormat.table,
 ) -> None:
     """Map a concept to codes in other vocabularies (UMLS)."""
 
@@ -343,7 +362,7 @@ def crosswalk_cmd(
     try:
         result = _run(_go())
     except Exception as exc:  # noqa: BLE001
-        _handle_errors(exc)
+        _handle_errors(exc, output=output)
         return
 
     if output == OutputFormat.json:
@@ -354,10 +373,10 @@ def crosswalk_cmd(
 
 @app.command("parents")
 def parents_cmd(
-    identifier: str = typer.Argument(...),
-    ontology: str = typer.Option(..., "--ontology", "-o"),
-    backend: BackendOpt = typer.Option(BackendOpt.auto, "--backend", "-b"),
-    output: OutputFormat = typer.Option(OutputFormat.table, "--output", "-f"),
+    identifier: Annotated[str, typer.Argument()],
+    ontology: Annotated[str, typer.Option("--ontology", "-o")],
+    backend: Annotated[BackendOpt, typer.Option("--backend", "-b")] = BackendOpt.auto,
+    output: Annotated[OutputFormat, typer.Option("--output", "-f")] = OutputFormat.table,
 ) -> None:
     """List immediate parents of a concept."""
 
@@ -372,7 +391,7 @@ def parents_cmd(
     try:
         nodes = _run(_go())
     except Exception as exc:  # noqa: BLE001
-        _handle_errors(exc)
+        _handle_errors(exc, output=output)
         return
 
     if output == OutputFormat.json:
@@ -383,10 +402,10 @@ def parents_cmd(
 
 @app.command("children")
 def children_cmd(
-    identifier: str = typer.Argument(...),
-    ontology: str = typer.Option(..., "--ontology", "-o"),
-    backend: BackendOpt = typer.Option(BackendOpt.auto, "--backend", "-b"),
-    output: OutputFormat = typer.Option(OutputFormat.table, "--output", "-f"),
+    identifier: Annotated[str, typer.Argument()],
+    ontology: Annotated[str, typer.Option("--ontology", "-o")],
+    backend: Annotated[BackendOpt, typer.Option("--backend", "-b")] = BackendOpt.auto,
+    output: Annotated[OutputFormat, typer.Option("--output", "-f")] = OutputFormat.table,
 ) -> None:
     """List immediate children of a concept."""
 
@@ -401,7 +420,7 @@ def children_cmd(
     try:
         nodes = _run(_go())
     except Exception as exc:  # noqa: BLE001
-        _handle_errors(exc)
+        _handle_errors(exc, output=output)
         return
 
     if output == OutputFormat.json:
@@ -412,11 +431,11 @@ def children_cmd(
 
 @app.command("lookup")
 def lookup_cmd(
-    query: str = typer.Argument(..., help="Term, code, or CUI (auto-detected)"),
-    ontologies: Optional[str] = typer.Option(None, "--ontologies", "-o"),
-    limit: int = typer.Option(15, "--limit", "-n", min=1, max=200),
-    exact: bool = typer.Option(False, "--exact"),
-    output: OutputFormat = typer.Option(OutputFormat.table, "--output", "-f"),
+    query: Annotated[str, typer.Argument(help="Term, code, or CUI (auto-detected)")],
+    ontologies: Annotated[str | None, typer.Option("--ontologies", "-o")] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n", min=1, max=200)] = 15,
+    exact: Annotated[bool, typer.Option("--exact")] = False,
+    output: Annotated[OutputFormat, typer.Option("--output", "-f")] = OutputFormat.table,
 ) -> None:
     """Smart lookup: auto-detect term vs code vs CUI."""
 
@@ -432,7 +451,7 @@ def lookup_cmd(
     try:
         result = _run(_go())
     except Exception as exc:  # noqa: BLE001
-        _handle_errors(exc)
+        _handle_errors(exc, output=output)
         return
 
     if output == OutputFormat.json:
