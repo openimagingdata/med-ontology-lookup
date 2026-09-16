@@ -18,13 +18,13 @@ Python library and CLI for looking up medical terms in **RadLex**, **SNOMED-CT**
 With [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
-uv sync --extra dev
+uv sync
 ```
 
 Or with pip:
 
 ```bash
-pip install -e ".[dev]"
+pip install -e .
 ```
 
 Requires Python 3.11+.
@@ -165,10 +165,20 @@ Point your agent runtime at that directory (or copy/symlink it into the runtimeâ
 
 ## Development
 
+The repository's check commands are collected in `Taskfile.yml`. With
+[Task](https://taskfile.dev/) installed:
+
 ```bash
-pip install -e ".[dev]"
-pytest
+uv sync
+task check         # lockfile, format, lint, types, and current-Python tests
+task test-matrix   # tests on Python 3.11, 3.12, 3.13, and 3.14
+task verify        # standard checks, Python matrix, and package build
+task fix           # safe Ruff fixes and formatting
 ```
+
+Each task is a thin wrapper around a locked `uv` command; `task --list` shows the individual
+commands. The lockfile resolves the type checker and formatter/linter versions, so the same versions
+run locally and in automation while `pyproject.toml` expresses the compatible lower bounds.
 
 Tests mock HTTP with `respx` (no live API keys required).
 

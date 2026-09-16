@@ -102,3 +102,17 @@ src/med_ontology_lookup/
 - Added minimum success-payload validation beside each adapter mapper, structured partial failures
   on search results, and credential-safe CLI JSON errors. The executable plan incorporates two
   rounds of independent `gpt-6-astra` review.
+
+### 2026-09-14 — adopt `ty` for reproducible type checks
+
+- Replaced the undocumented local Pyright invocation with `ty>=0.0.80` in the locked development
+  dependencies and made `uv run ty check` the documented repository check.
+- Kept exact tool versions in `uv.lock` rather than duplicating them as direct constraints in
+  `pyproject.toml`; upgrades remain explicit and independently verified.
+- Confirmed that current `uv` also provides an experimental `uv check` command backed by `ty`, but
+  it does not yet orchestrate Ruff, pytest, builds, and smoke checks. Nox was rejected as too much
+  overlapping environment machinery for this project.
+- Added a thin Taskfile over locked `uv` commands. `task check` is the normal lock/format/lint/type/
+  test entry point; `task test-matrix` covers Python 3.11–3.14; `task verify` adds the matrix and
+  package build. Development tools now use the standardized PEP 735 `dev` dependency group, which
+  `uv` syncs by default, with exact Ruff and `ty` versions resolved in `uv.lock`.

@@ -368,11 +368,7 @@ def resolve_semantic_types(values: list[str] | None) -> list[str] | None:
             continue
 
         # Substring match on official names (e.g. "Disease" → Disease or Syndrome)
-        partial = [
-            (tui, name)
-            for tui, name in SEMANTIC_TYPES.items()
-            if key in name.casefold()
-        ]
+        partial = [(tui, name) for tui, name in SEMANTIC_TYPES.items() if key in name.casefold()]
         if len(partial) == 1:
             resolved.append(partial[0][0])
             continue
@@ -381,9 +377,7 @@ def resolve_semantic_types(values: list[str] | None) -> list[str] | None:
             partial.sort(key=lambda p: len(p[1]))
             # If alias-like uniqueness fails, error with options
             opts = ", ".join(f"{n} ({t})" for t, n in partial[:8])
-            raise ValueError(
-                f"Ambiguous semantic type {token!r}. Did you mean one of: {opts}?"
-            )
+            raise ValueError(f"Ambiguous semantic type {token!r}. Did you mean one of: {opts}?")
 
         unknown.append(token)
 
@@ -410,9 +404,7 @@ def resolve_semantic_types(values: list[str] | None) -> list[str] | None:
                 name_only = [h.split(" (")[0] for h in hits]
                 suggestions.append(f"{u!r} → try {', '.join(name_only)}")
             else:
-                suggestions.append(
-                    f"{u!r} (run `molu search --print-types` for short-hands)"
-                )
+                suggestions.append(f"{u!r} (run `molu search --print-types` for short-hands)")
         raise ValueError(
             "Unknown semantic type(s): "
             + "; ".join(suggestions)
