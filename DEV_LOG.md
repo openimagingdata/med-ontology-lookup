@@ -116,3 +116,19 @@ src/med_ontology_lookup/
   test entry point; `task test-matrix` covers Python 3.11–3.14; `task verify` adds the matrix and
   package build. Development tools now use the standardized PEP 735 `dev` dependency group, which
   `uv` syncs by default, with exact Ruff and `ty` versions resolved in `uv.lock`.
+
+### 2026-09-17 — validate PR #14 review findings
+
+- Reproduced and fixed loss of the observed successful HTTP status during BioPortal and UMLS
+  payload validation; validation failures now retain any actual 2xx status rather than synthesizing
+  `200`.
+- Made BioPortal class probes accept every HTTPX-defined successful 2xx response and normalized
+  mixed string/object UMLS semantic-type lists member by member.
+- Removed duplicated table output for a singular provider failure while retaining per-failure
+  details for aggregate errors.
+- Rejected the proposed HTTPX catch widening: in HTTPX 0.28.1, `DecodingError` inherits from
+  `RequestError`, which both adapters already catch. Adapter-level regressions now lock down that
+  typed `invalid_response` translation.
+- Corrected the current test count and automation wording. Deliberately retained the concise
+  `Unreleased` changelog entry and clarified that changelog sections hold shipped or pending-release
+  user-visible changes, while engineering detail belongs in this development log.

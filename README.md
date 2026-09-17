@@ -177,8 +177,8 @@ task fix           # safe Ruff fixes and formatting
 ```
 
 Each task is a thin wrapper around a locked `uv` command; `task --list` shows the individual
-commands. The lockfile resolves the type checker and formatter/linter versions, so the same versions
-run locally and in automation while `pyproject.toml` expresses the compatible lower bounds.
+commands. The lockfile resolves the type checker and formatter/linter versions, so local and future
+automation runs can use the same versions while `pyproject.toml` expresses compatible lower bounds.
 
 Tests mock HTTP with `respx` (no live API keys required).
 

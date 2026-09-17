@@ -182,6 +182,18 @@ async def test_search_rejects_invalid_json(client: UMLSClient):
     assert caught.value.failure.category == FailureCategory.INVALID_JSON
 
 
+@pytest.mark.asyncio
+async def test_content_decoding_error_is_typed():
+    def raise_decoding_error(request: httpx.Request) -> httpx.Response:
+        raise httpx.DecodingError("invalid content encoding", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(raise_decoding_error)) as transport:
+        client = UMLSClient(api_key="test-key", base_url=BASE, client=transport)
+        with pytest.raises(ProviderError) as caught:
+            await client.search("x")
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+
+
 @respx.mock
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -229,6 +241,17 @@ async def test_search_rejects_invalid_success_shapes(client: UMLSClient, payload
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_search_preserves_non_200_success_status_on_invalid_shape(client: UMLSClient):
+    respx.get(f"{BASE}/search/current").mock(return_value=httpx.Response(206, json={}))
+    async with client:
+        with pytest.raises(ProviderError) as caught:
+            await client.search("x")
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+    assert caught.value.failure.http_status == 206
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_get_cui_rejects_empty_result(client: UMLSClient):
     respx.get(f"{BASE}/content/current/CUI/C0032326").mock(
         return_value=httpx.Response(200, json={"result": {}})
@@ -258,6 +281,35 @@ async def test_get_cui_rejects_malformed_semantic_types(client: UMLSClient):
         with pytest.raises(ProviderError) as caught:
             await client.get_cui("C0032326")
     assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_search_normalizes_mixed_semantic_type_shapes(client: UMLSClient):
+    respx.get(f"{BASE}/search/current").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": {
+                    "recCount": 1,
+                    "results": [
+                        {
+                            "ui": "C0032326",
+                            "name": "Pneumothorax",
+                            "rootSource": "MTH",
+                            "semanticTypes": [
+                                "Disease or Syndrome",
+                                {"name": "Finding"},
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    async with client:
+        results = await client.search("pneumothorax")
+    assert results.results[0].semantic_types == ["Disease or Syndrome", "Finding"]
 
 
 @respx.mock

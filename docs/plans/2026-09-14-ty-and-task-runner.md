@@ -48,7 +48,7 @@ normal offline gate, `task test-matrix` covers Python 3.11–3.14, `task fix` ap
 and `task verify` combines checks, the matrix, and package builds.
 
 Final verification completed with Task 3.53.1, `ty` 0.0.80, and Ruff 0.16.7. `task verify` passed:
-the lockfile was current, format/lint/type checks were clean, all 113 tests passed on the active
+the lockfile was current, format/lint/type checks were clean, all 121 tests passed on the active
 environment and independently on Python 3.11, 3.12, 3.13, and 3.14, and both distribution artifacts
 built successfully. Twine metadata validation, installed-wheel imports, CLI smoke checks, and
 `git diff --check` also passed. `CHANGELOG.md` did not need another entry because this changes only

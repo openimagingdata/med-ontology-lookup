@@ -283,6 +283,22 @@ async def test_search_rejects_invalid_json(client: BioPortalClient):
     assert caught.value.failure.category == FailureCategory.INVALID_JSON
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["search", "class_probe"])
+async def test_content_decoding_error_is_typed(operation: str):
+    def raise_decoding_error(request: httpx.Request) -> httpx.Response:
+        raise httpx.DecodingError("invalid content encoding", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(raise_decoding_error)) as transport:
+        client = BioPortalClient(api_key="test-key", base_url=BASE, client=transport)
+        with pytest.raises(ProviderError) as caught:
+            if operation == "search":
+                await client.search("x", ontologies=["RADLEX"])
+            else:
+                await client._class_exists("RADLEX", "RID1")
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+
+
 @respx.mock
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -304,6 +320,19 @@ async def test_search_rejects_invalid_success_shapes(client: BioPortalClient, pa
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_search_preserves_non_200_success_status_on_invalid_shape(
+    client: BioPortalClient,
+):
+    respx.get(f"{BASE}/search").mock(return_value=httpx.Response(206, json={}))
+    async with client:
+        with pytest.raises(ProviderError) as caught:
+            await client.search("x", ontologies=["RADLEX"])
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+    assert caught.value.failure.http_status == 206
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_class_probe_rejects_invalid_success_shape(client: BioPortalClient):
     respx.get(url__regex=rf"{BASE}/ontologies/RADLEX/classes/.*").mock(
         return_value=httpx.Response(200, json={})
@@ -312,6 +341,17 @@ async def test_class_probe_rejects_invalid_success_shape(client: BioPortalClient
         with pytest.raises(ProviderError) as caught:
             await client._class_exists("RADLEX", "RID1")
     assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_class_probe_accepts_non_200_success(client: BioPortalClient):
+    iri = "http://www.radlex.org/RID/RID1"
+    respx.get(f"{BASE}/ontologies/RADLEX/classes/{quote(iri, safe='')}").mock(
+        return_value=httpx.Response(206, json={"@id": iri, "prefLabel": "finding"})
+    )
+    async with client:
+        assert await client._class_exists("RADLEX", iri) is True
 
 
 @respx.mock

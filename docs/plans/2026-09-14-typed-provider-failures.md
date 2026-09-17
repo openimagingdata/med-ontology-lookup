@@ -285,7 +285,7 @@ redaction.
 
 Final verification:
 
-- `113 passed` under each supported Python version, 3.11, 3.12, 3.13, and 3.14, using isolated
+- `121 passed` under each supported Python version, 3.11, 3.12, 3.13, and 3.14, using isolated
   project environments.
 - The locked `ty` check reported zero errors; Ruff lint and format checks passed;
   `git diff --check` passed.

@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from med_ontology_lookup.errors import ProviderFailureError
+from med_ontology_lookup.errors import ProviderError, ProviderFailureError
 from med_ontology_lookup.http_util import format_http_error, redact_secrets
 from med_ontology_lookup.models import (
     Concept,
@@ -189,8 +189,10 @@ def _handle_errors(
                 }
             }
             err_console.print_json(json.dumps(payload))
-        else:
+        elif isinstance(exc, ProviderError):
             err_console.print(f"[red]Provider error:[/red] {exc}")
+        else:
+            err_console.print(f"[red]Provider errors:[/red] {exc}")
             for failure in exc.failures:
                 err_console.print(f"[dim]{failure.summary()}[/dim]")
         raise typer.Exit(code=1) from None

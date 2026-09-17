@@ -164,7 +164,7 @@ class BioPortalClient:
         operation: ProviderOperation,
         ontology: str | None = None,
         allow_not_found: bool = False,
-    ) -> object:
+    ) -> tuple[object, int]:
         client = self._require_client()
         url = f"{self.base_url}{path}"
         try:
@@ -188,11 +188,14 @@ class BioPortalClient:
                 ontology=ontology,
                 allow_canonical_not_found=allow_not_found and self._uses_canonical_route,
             ) from None
-        return decode_json(
-            response,
-            provider=Backend.BIOPORTAL,
-            operation=operation,
-            ontology=ontology,
+        return (
+            decode_json(
+                response,
+                provider=Backend.BIOPORTAL,
+                operation=operation,
+                ontology=ontology,
+            ),
+            response.status_code,
         )
 
     def _invalid(
@@ -200,6 +203,7 @@ class BioPortalClient:
         path: str,
         *,
         operation: ProviderOperation,
+        http_status: int,
         ontology: str | None = None,
     ) -> ProviderFailureError:
         return invalid_response(
@@ -207,7 +211,7 @@ class BioPortalClient:
             operation=operation,
             endpoint=f"{self.base_url}{path}",
             ontology=ontology,
-            http_status=200,
+            http_status=http_status,
         )
 
     @staticmethod
@@ -339,7 +343,7 @@ class BioPortalClient:
             params["also_search_properties"] = "true"
 
         ontology = onts[0] if len(onts) == 1 else None
-        data = await self._get(
+        data, http_status = await self._get(
             "/search",
             params,
             operation=ProviderOperation.SEARCH,
@@ -347,7 +351,10 @@ class BioPortalClient:
         )
         if not isinstance(data, dict) or not isinstance(data.get("collection"), list):
             raise self._invalid(
-                "/search", operation=ProviderOperation.SEARCH, ontology=ontology
+                "/search",
+                operation=ProviderOperation.SEARCH,
+                http_status=http_status,
+                ontology=ontology,
             ) from None
         collection = data["collection"]
         total_count = data.get("totalCount")
@@ -355,11 +362,17 @@ class BioPortalClient:
             not isinstance(total_count, int) or isinstance(total_count, bool)
         ):
             raise self._invalid(
-                "/search", operation=ProviderOperation.SEARCH, ontology=ontology
+                "/search",
+                operation=ProviderOperation.SEARCH,
+                http_status=http_status,
+                ontology=ontology,
             ) from None
         if not all(self._valid_search_item(item) for item in collection):
             raise self._invalid(
-                "/search", operation=ProviderOperation.SEARCH, ontology=ontology
+                "/search",
+                operation=ProviderOperation.SEARCH,
+                http_status=http_status,
+                ontology=ontology,
             ) from None
         hits = [self._hit_from_item(item, query=query) for item in collection]
         return SearchResults(
@@ -553,7 +566,7 @@ class BioPortalClient:
             if translated is None:
                 raise
             raise translated from None
-        if response.status_code == 200:
+        if response.is_success:
             data = decode_json(
                 response,
                 provider=Backend.BIOPORTAL,
@@ -564,6 +577,7 @@ class BioPortalClient:
                 raise self._invalid(
                     f"/ontologies/{ontology}/classes/{encoded}",
                     operation=ProviderOperation.RESOLVE_CLASS,
+                    http_status=response.status_code,
                     ontology=ontology,
                 ) from None
             return True
@@ -651,7 +665,7 @@ class BioPortalClient:
         """Fetch a class by ontology acronym and class id or full IRI."""
         resolved = await self.resolve_class_id(ontology, class_id)
         encoded = quote(resolved, safe="")
-        data = await self._get(
+        data, http_status = await self._get(
             f"/ontologies/{ontology}/classes/{encoded}",
             {
                 "include": self.CLASS_INCLUDE,
@@ -666,6 +680,7 @@ class BioPortalClient:
             raise self._invalid(
                 f"/ontologies/{ontology}/classes/{encoded}",
                 operation=ProviderOperation.GET_CONCEPT,
+                http_status=http_status,
                 ontology=ontology,
             ) from None
         assert isinstance(data, dict)
@@ -674,7 +689,7 @@ class BioPortalClient:
     async def parents(self, ontology: str, class_id: str) -> list[HierarchyNode]:
         resolved = await self.resolve_class_id(ontology, class_id)
         encoded = quote(resolved, safe="")
-        data = await self._get(
+        data, http_status = await self._get(
             f"/ontologies/{ontology}/classes/{encoded}/parents",
             {
                 "include": "prefLabel",
@@ -693,12 +708,14 @@ class BioPortalClient:
             raise self._invalid(
                 f"/ontologies/{ontology}/classes/{encoded}/parents",
                 operation=ProviderOperation.PARENTS,
+                http_status=http_status,
                 ontology=ontology,
             ) from None
         if not all(self._valid_hierarchy_item(item) for item in items):
             raise self._invalid(
                 f"/ontologies/{ontology}/classes/{encoded}/parents",
                 operation=ProviderOperation.PARENTS,
+                http_status=http_status,
                 ontology=ontology,
             ) from None
         return [self._node_from_item(item, ontology) for item in items]
@@ -706,7 +723,7 @@ class BioPortalClient:
     async def children(self, ontology: str, class_id: str) -> list[HierarchyNode]:
         resolved = await self.resolve_class_id(ontology, class_id)
         encoded = quote(resolved, safe="")
-        data = await self._get(
+        data, http_status = await self._get(
             f"/ontologies/{ontology}/classes/{encoded}/children",
             {
                 "include": "prefLabel",
@@ -726,12 +743,14 @@ class BioPortalClient:
             raise self._invalid(
                 f"/ontologies/{ontology}/classes/{encoded}/children",
                 operation=ProviderOperation.CHILDREN,
+                http_status=http_status,
                 ontology=ontology,
             ) from None
         if not all(self._valid_hierarchy_item(item) for item in items):
             raise self._invalid(
                 f"/ontologies/{ontology}/classes/{encoded}/children",
                 operation=ProviderOperation.CHILDREN,
+                http_status=http_status,
                 ontology=ontology,
             ) from None
         return [self._node_from_item(item, ontology) for item in items]

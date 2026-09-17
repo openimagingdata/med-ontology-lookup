@@ -99,7 +99,7 @@ class UMLSClient:
         operation: ProviderOperation,
         ontology: str | None = None,
         allow_not_found: bool = False,
-    ) -> object:
+    ) -> tuple[object, int]:
         client = self._require_client()
         merged = dict(params or {})
         merged["apiKey"] = self._require_key()
@@ -125,11 +125,14 @@ class UMLSClient:
                 ontology=ontology,
                 allow_canonical_not_found=allow_not_found and self._uses_canonical_route,
             ) from None
-        return decode_json(
-            response,
-            provider=Backend.UMLS,
-            operation=operation,
-            ontology=ontology,
+        return (
+            decode_json(
+                response,
+                provider=Backend.UMLS,
+                operation=operation,
+                ontology=ontology,
+            ),
+            response.status_code,
         )
 
     def _invalid(
@@ -137,6 +140,7 @@ class UMLSClient:
         path: str,
         *,
         operation: ProviderOperation,
+        http_status: int,
         ontology: str | None = None,
     ) -> ProviderError:
         return invalid_response(
@@ -144,7 +148,7 @@ class UMLSClient:
             operation=operation,
             endpoint=f"{self.base_url}{path}",
             ontology=ontology,
-            http_status=200,
+            http_status=http_status,
         )
 
     def _result(
@@ -153,10 +157,16 @@ class UMLSClient:
         *,
         path: str,
         operation: ProviderOperation,
+        http_status: int,
         ontology: str | None = None,
     ) -> object:
         if not isinstance(data, dict) or "result" not in data:
-            raise self._invalid(path, operation=operation, ontology=ontology) from None
+            raise self._invalid(
+                path,
+                operation=operation,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
         return data["result"]
 
     @staticmethod
@@ -179,6 +189,15 @@ class UMLSClient:
             )
             for member in value
         )
+
+    @staticmethod
+    def _semantic_type_names(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            str(member.get("name") or "") if isinstance(member, dict) else str(member)
+            for member in value
+        ]
 
     @staticmethod
     def _valid_boolean(value: object) -> bool:
@@ -222,7 +241,7 @@ class UMLSClient:
             params["partialSearch"] = "true"
 
         path = f"/search/{self.version}"
-        data = await self._get(
+        data, http_status = await self._get(
             path,
             params,
             operation=ProviderOperation.SEARCH,
@@ -232,12 +251,14 @@ class UMLSClient:
             data,
             path=path,
             operation=ProviderOperation.SEARCH,
+            http_status=http_status,
             ontology=sabs[0] if sabs and len(sabs) == 1 else None,
         )
         if not isinstance(result_block, dict) or not isinstance(result_block.get("results"), list):
             raise self._invalid(
                 path,
                 operation=ProviderOperation.SEARCH,
+                http_status=http_status,
                 ontology=sabs[0] if sabs and len(sabs) == 1 else None,
             ) from None
         record_count = result_block.get("recCount")
@@ -247,6 +268,7 @@ class UMLSClient:
             raise self._invalid(
                 path,
                 operation=ProviderOperation.SEARCH,
+                http_status=http_status,
                 ontology=sabs[0] if sabs and len(sabs) == 1 else None,
             ) from None
         raw_results = result_block["results"]
@@ -256,6 +278,7 @@ class UMLSClient:
                 raise self._invalid(
                     path,
                     operation=ProviderOperation.SEARCH,
+                    http_status=http_status,
                     ontology=sabs[0] if sabs and len(sabs) == 1 else None,
                 ) from None
             # UMLS returns a sentinel when no results
@@ -266,6 +289,7 @@ class UMLSClient:
                 raise self._invalid(
                     path,
                     operation=ProviderOperation.SEARCH,
+                    http_status=http_status,
                     ontology=sabs[0] if sabs and len(sabs) == 1 else None,
                 ) from None
             if not all(
@@ -277,15 +301,13 @@ class UMLSClient:
                 raise self._invalid(
                     path,
                     operation=ProviderOperation.SEARCH,
+                    http_status=http_status,
                     ontology=sabs[0] if sabs and len(sabs) == 1 else None,
                 ) from None
             name = str(item.get("name") or "")
             root = str(item.get("rootSource") or "UMLS")
             stypes = item.get("semanticTypes") or []
-            if stypes and isinstance(stypes[0], dict):
-                stype_names = [str(s.get("name") or "") for s in stypes]
-            else:
-                stype_names = [str(s) for s in stypes]
+            stype_names = self._semantic_type_names(stypes)
 
             is_cui = ui.upper().startswith("C") and return_id_type == "concept"
             hits.append(
@@ -314,7 +336,7 @@ class UMLSClient:
     async def get_cui(self, cui: str) -> Concept:
         """Fetch concept metadata for a CUI."""
         path = f"/content/{self.version}/CUI/{cui.upper()}"
-        data = await self._get(
+        data, http_status = await self._get(
             path,
             operation=ProviderOperation.GET_CONCEPT,
             allow_not_found=True,
@@ -323,15 +345,20 @@ class UMLSClient:
             data,
             path=path,
             operation=ProviderOperation.GET_CONCEPT,
+            http_status=http_status,
         )
         if (
             not isinstance(result, dict)
             or not all(self._nonempty_string(result, field) for field in ("ui", "name"))
             or not self._valid_semantic_types(result.get("semanticTypes"))
         ):
-            raise self._invalid(path, operation=ProviderOperation.GET_CONCEPT) from None
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.GET_CONCEPT,
+                http_status=http_status,
+            ) from None
         stypes = result.get("semanticTypes") or []
-        stype_names = [str(s.get("name") if isinstance(s, dict) else s) for s in stypes]
+        stype_names = self._semantic_type_names(stypes)
         name = str(result.get("name") or "")
         ui = str(result.get("ui") or cui.upper())
         return Concept(
@@ -353,7 +380,7 @@ class UMLSClient:
         """Return definition strings for a CUI (may be empty)."""
         path = f"/content/{self.version}/CUI/{cui.upper()}/definitions"
         try:
-            data = await self._get(
+            data, http_status = await self._get(
                 path,
                 operation=ProviderOperation.GET_DEFINITIONS,
                 allow_not_found=True,
@@ -366,6 +393,7 @@ class UMLSClient:
             data,
             path=path,
             operation=ProviderOperation.GET_DEFINITIONS,
+            http_status=http_status,
         )
         if results == "NONE" or results == []:
             return []
@@ -375,7 +403,11 @@ class UMLSClient:
             and bool(item["value"].strip())
             for item in results
         ):
-            raise self._invalid(path, operation=ProviderOperation.GET_DEFINITIONS) from None
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.GET_DEFINITIONS,
+                http_status=http_status,
+            ) from None
         defs: list[str] = []
         for item in results:
             defs.append(item["value"])
@@ -397,17 +429,26 @@ class UMLSClient:
             params["ttys"] = "PT"
 
         path = f"/content/{self.version}/CUI/{cui.upper()}/atoms"
-        data = await self._get(
+        data, http_status = await self._get(
             path,
             params,
             operation=ProviderOperation.GET_ATOMS,
             allow_not_found=True,
         )
-        results = self._result(data, path=path, operation=ProviderOperation.GET_ATOMS)
+        results = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.GET_ATOMS,
+            http_status=http_status,
+        )
         if results == "NONE" or results == []:
             return []
         if not isinstance(results, list):
-            raise self._invalid(path, operation=ProviderOperation.GET_ATOMS) from None
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.GET_ATOMS,
+                http_status=http_status,
+            ) from None
 
         codes: list[SourceCode] = []
         seen: set[tuple[str, str]] = set()
@@ -415,7 +456,11 @@ class UMLSClient:
             if not isinstance(item, dict) or not all(
                 self._nonempty_string(item, field) for field in ("rootSource", "name")
             ):
-                raise self._invalid(path, operation=ProviderOperation.GET_ATOMS) from None
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.GET_ATOMS,
+                    http_status=http_status,
+                ) from None
             if (
                 (item.get("termType") is not None and not isinstance(item.get("termType"), str))
                 or not self._valid_boolean(item.get("obsolete"))
@@ -425,13 +470,21 @@ class UMLSClient:
                     and not isinstance(item.get("sourceConcept"), str)
                 )
             ):
-                raise self._invalid(path, operation=ProviderOperation.GET_ATOMS) from None
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.GET_ATOMS,
+                    http_status=http_status,
+                ) from None
             source = str(item.get("rootSource") or "")
             code = _code_from_atom_url(item.get("code"))
             if not code:
                 code = _code_from_atom_url(item.get("sourceConcept"))
             if not code:
-                raise self._invalid(path, operation=ProviderOperation.GET_ATOMS) from None
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.GET_ATOMS,
+                    http_status=http_status,
+                ) from None
             key = (source, code)
             if key in seen:
                 continue
@@ -527,7 +580,7 @@ class UMLSClient:
         """Fetch a source-asserted identifier."""
         sab = self.normalize_sab(source)
         path = f"/content/{self.version}/source/{sab}/{code}"
-        data = await self._get(
+        data, http_status = await self._get(
             path,
             operation=ProviderOperation.GET_SOURCE,
             ontology=sab,
@@ -537,6 +590,7 @@ class UMLSClient:
             data,
             path=path,
             operation=ProviderOperation.GET_SOURCE,
+            http_status=http_status,
             ontology=sab,
         )
         if (
@@ -548,7 +602,10 @@ class UMLSClient:
             )
         ):
             raise self._invalid(
-                path, operation=ProviderOperation.GET_SOURCE, ontology=sab
+                path,
+                operation=ProviderOperation.GET_SOURCE,
+                http_status=http_status,
+                ontology=sab,
             ) from None
         name = str(result.get("name") or "")
         ui = str(result.get("ui") or code)
@@ -573,17 +630,28 @@ class UMLSClient:
     async def parents(self, source: str, code: str) -> list[HierarchyNode]:
         sab = self.normalize_sab(source)
         path = f"/content/{self.version}/source/{sab}/{code}/parents"
-        data = await self._get(
+        data, http_status = await self._get(
             path,
             operation=ProviderOperation.PARENTS,
             ontology=sab,
             allow_not_found=True,
         )
-        results = self._result(data, path=path, operation=ProviderOperation.PARENTS, ontology=sab)
+        results = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.PARENTS,
+            http_status=http_status,
+            ontology=sab,
+        )
         if results == "NONE" or results == []:
             return []
         if not isinstance(results, list):
-            raise self._invalid(path, operation=ProviderOperation.PARENTS, ontology=sab) from None
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.PARENTS,
+                http_status=http_status,
+                ontology=sab,
+            ) from None
         nodes: list[HierarchyNode] = []
         for item in results:
             if (
@@ -593,7 +661,10 @@ class UMLSClient:
                 or ("rootSource" in item and not isinstance(item["rootSource"], str))
             ):
                 raise self._invalid(
-                    path, operation=ProviderOperation.PARENTS, ontology=sab
+                    path,
+                    operation=ProviderOperation.PARENTS,
+                    http_status=http_status,
+                    ontology=sab,
                 ) from None
             ui = str(item.get("ui") or "")
             nodes.append(
@@ -610,17 +681,28 @@ class UMLSClient:
     async def children(self, source: str, code: str) -> list[HierarchyNode]:
         sab = self.normalize_sab(source)
         path = f"/content/{self.version}/source/{sab}/{code}/children"
-        data = await self._get(
+        data, http_status = await self._get(
             path,
             operation=ProviderOperation.CHILDREN,
             ontology=sab,
             allow_not_found=True,
         )
-        results = self._result(data, path=path, operation=ProviderOperation.CHILDREN, ontology=sab)
+        results = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.CHILDREN,
+            http_status=http_status,
+            ontology=sab,
+        )
         if results == "NONE" or results == []:
             return []
         if not isinstance(results, list):
-            raise self._invalid(path, operation=ProviderOperation.CHILDREN, ontology=sab) from None
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.CHILDREN,
+                http_status=http_status,
+                ontology=sab,
+            ) from None
         nodes: list[HierarchyNode] = []
         for item in results:
             if (
@@ -630,7 +712,10 @@ class UMLSClient:
                 or ("rootSource" in item and not isinstance(item["rootSource"], str))
             ):
                 raise self._invalid(
-                    path, operation=ProviderOperation.CHILDREN, ontology=sab
+                    path,
+                    operation=ProviderOperation.CHILDREN,
+                    http_status=http_status,
+                    ontology=sab,
                 ) from None
             ui = str(item.get("ui") or "")
             nodes.append(

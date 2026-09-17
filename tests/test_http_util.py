@@ -85,3 +85,23 @@ def test_handle_provider_error_prints_typed_json_to_stderr(capsys):
     payload = json.loads(captured.err)
     assert payload["error"]["code"] == "provider_failure"
     assert payload["error"]["failures"][0]["category"] == "authentication"
+
+
+def test_handle_single_provider_error_prints_summary_once(capsys):
+    import pytest
+    import typer
+
+    exc = ProviderError(
+        ProviderFailure(
+            provider=Backend.UMLS,
+            operation=ProviderOperation.SEARCH,
+            category=FailureCategory.AUTHENTICATION,
+            endpoint="https://example.test/search",
+            http_status=401,
+        )
+    )
+    with pytest.raises(typer.Exit):
+        _handle_errors(exc)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("umls search: authentication") == 1
