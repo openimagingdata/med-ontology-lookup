@@ -42,7 +42,7 @@ def sanitize_endpoint(url: str) -> str:
 
 
 def format_http_error(exc: BaseException) -> str:
-    """Status + method + sanitized URL; never include apiKey."""
+    """Return safe status/method/endpoint details, or the type for a statusless error."""
     response = getattr(exc, "response", None)
     request = getattr(exc, "request", None)
     status = getattr(response, "status_code", None)

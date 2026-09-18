@@ -72,6 +72,9 @@ request with tested changes and evidence-backed responses.
   at <https://www.python-httpx.org/exceptions/>.
 - **Fixed:** README wording no longer claims that hosted automation already exists, and the current
   project baseline reports 121 tests.
+- **Fixed in final review:** The `format_http_error` docstring now describes both actual output
+  forms: safe status/method/endpoint details for response failures and the exception type for a
+  statusless error. Runtime behavior is unchanged.
 - **Retained deliberately:** The `Unreleased` changelog entry describes outside-user behavior
   required by issue #3. The project convention now explicitly permits pending-release user-facing
   changes under `Unreleased` while keeping engineering detail in `DEV_LOG.md`.
