@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 from urllib.parse import unquote
 
 import httpx
@@ -10,14 +10,24 @@ import httpx
 from med_ontology_lookup.config import (
     DEFAULT_UMLS_SABS,
     ONTOLOGY_TO_UMLS_SAB,
+    UMLS_BASE_URL,
     Settings,
     get_settings,
+)
+from med_ontology_lookup.errors import (
+    ProviderError,
+    decode_json,
+    error_for_request,
+    error_for_status,
+    invalid_response,
 )
 from med_ontology_lookup.models import (
     Backend,
     Concept,
     CrosswalkResult,
+    FailureCategory,
     HierarchyNode,
+    ProviderOperation,
     SearchHit,
     SearchResults,
     SourceCode,
@@ -53,12 +63,13 @@ class UMLSClient:
         self._settings = settings or get_settings()
         self.api_key = api_key if api_key is not None else self._settings.umls_key()
         self.base_url = (base_url or self._settings.umls_base_url).rstrip("/")
+        self._uses_canonical_route = self.base_url == UMLS_BASE_URL
         self.version = version or self._settings.umls_version
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout if timeout is not None else self._settings.http_timeout
 
-    async def __aenter__(self) -> UMLSClient:
+    async def __aenter__(self) -> Self:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout)
         return self
@@ -80,14 +91,121 @@ class UMLSClient:
             )
         return self._client
 
-    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        operation: ProviderOperation,
+        ontology: str | None = None,
+        allow_not_found: bool = False,
+    ) -> tuple[object, int]:
         client = self._require_client()
         merged = dict(params or {})
         merged["apiKey"] = self._require_key()
         url = f"{self.base_url}{path}"
-        response = await client.get(url, params=merged)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = await client.get(url, params=merged)
+        except httpx.RequestError as exc:
+            translated = error_for_request(
+                exc,
+                provider=Backend.UMLS,
+                operation=operation,
+                endpoint=url,
+                ontology=ontology,
+            )
+            if translated is None:
+                raise
+            raise translated from None
+        if not response.is_success:
+            raise error_for_status(
+                response,
+                provider=Backend.UMLS,
+                operation=operation,
+                ontology=ontology,
+                allow_canonical_not_found=allow_not_found and self._uses_canonical_route,
+            ) from None
+        return (
+            decode_json(
+                response,
+                provider=Backend.UMLS,
+                operation=operation,
+                ontology=ontology,
+            ),
+            response.status_code,
+        )
+
+    def _invalid(
+        self,
+        path: str,
+        *,
+        operation: ProviderOperation,
+        http_status: int,
+        ontology: str | None = None,
+    ) -> ProviderError:
+        return invalid_response(
+            provider=Backend.UMLS,
+            operation=operation,
+            endpoint=f"{self.base_url}{path}",
+            ontology=ontology,
+            http_status=http_status,
+        )
+
+    def _result(
+        self,
+        data: object,
+        *,
+        path: str,
+        operation: ProviderOperation,
+        http_status: int,
+        ontology: str | None = None,
+    ) -> object:
+        if not isinstance(data, dict) or "result" not in data:
+            raise self._invalid(
+                path,
+                operation=operation,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        return data["result"]
+
+    @staticmethod
+    def _nonempty_string(item: dict[str, Any], field: str) -> bool:
+        value = item.get(field)
+        return isinstance(value, str) and bool(value.strip())
+
+    @staticmethod
+    def _valid_semantic_types(value: object) -> bool:
+        if value is None:
+            return True
+        if not isinstance(value, list):
+            return False
+        return all(
+            (isinstance(member, str) and bool(member.strip()))
+            or (
+                isinstance(member, dict)
+                and isinstance(member.get("name"), str)
+                and bool(member["name"].strip())
+            )
+            for member in value
+        )
+
+    @staticmethod
+    def _semantic_type_names(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            str(member.get("name") or "") if isinstance(member, dict) else str(member)
+            for member in value
+        ]
+
+    @staticmethod
+    def _valid_boolean(value: object) -> bool:
+        return (
+            value is None
+            or isinstance(value, bool)
+            or (isinstance(value, str) and value.casefold() in {"true", "false"})
+        )
 
     @staticmethod
     def normalize_sab(source: str) -> str:
@@ -122,24 +240,74 @@ class UMLSClient:
         if partial_search:
             params["partialSearch"] = "true"
 
-        data = await self._get(f"/search/{self.version}", params)
-        result_block = data.get("result") or {}
-        raw_results = result_block.get("results") or []
+        path = f"/search/{self.version}"
+        data, http_status = await self._get(
+            path,
+            params,
+            operation=ProviderOperation.SEARCH,
+            ontology=sabs[0] if sabs and len(sabs) == 1 else None,
+        )
+        result_block = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.SEARCH,
+            http_status=http_status,
+            ontology=sabs[0] if sabs and len(sabs) == 1 else None,
+        )
+        if not isinstance(result_block, dict) or not isinstance(result_block.get("results"), list):
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.SEARCH,
+                http_status=http_status,
+                ontology=sabs[0] if sabs and len(sabs) == 1 else None,
+            ) from None
+        record_count = result_block.get("recCount")
+        if record_count is not None and (
+            not isinstance(record_count, int) or isinstance(record_count, bool)
+        ):
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.SEARCH,
+                http_status=http_status,
+                ontology=sabs[0] if sabs and len(sabs) == 1 else None,
+            ) from None
+        raw_results = result_block["results"]
         hits: list[SearchHit] = []
         for item in raw_results:
             if not isinstance(item, dict):
-                continue
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.SEARCH,
+                    http_status=http_status,
+                    ontology=sabs[0] if sabs and len(sabs) == 1 else None,
+                ) from None
             # UMLS returns a sentinel when no results
             ui = str(item.get("ui") or "")
             if ui in {"", "NONE"}:
-                continue
+                if ui == "NONE":
+                    continue
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.SEARCH,
+                    http_status=http_status,
+                    ontology=sabs[0] if sabs and len(sabs) == 1 else None,
+                ) from None
+            if not all(
+                self._nonempty_string(item, field) for field in ("ui", "name", "rootSource")
+            ) or not (
+                self._valid_semantic_types(item.get("semanticTypes"))
+                and (item.get("uri") is None or isinstance(item.get("uri"), str))
+            ):
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.SEARCH,
+                    http_status=http_status,
+                    ontology=sabs[0] if sabs and len(sabs) == 1 else None,
+                ) from None
             name = str(item.get("name") or "")
             root = str(item.get("rootSource") or "UMLS")
             stypes = item.get("semanticTypes") or []
-            if stypes and isinstance(stypes[0], dict):
-                stype_names = [str(s.get("name") or "") for s in stypes]
-            else:
-                stype_names = [str(s) for s in stypes]
+            stype_names = self._semantic_type_names(stypes)
 
             is_cui = ui.upper().startswith("C") and return_id_type == "concept"
             hits.append(
@@ -167,12 +335,30 @@ class UMLSClient:
 
     async def get_cui(self, cui: str) -> Concept:
         """Fetch concept metadata for a CUI."""
-        data = await self._get(f"/content/{self.version}/CUI/{cui.upper()}")
-        result = data.get("result") or data
+        path = f"/content/{self.version}/CUI/{cui.upper()}"
+        data, http_status = await self._get(
+            path,
+            operation=ProviderOperation.GET_CONCEPT,
+            allow_not_found=True,
+        )
+        result = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.GET_CONCEPT,
+            http_status=http_status,
+        )
+        if (
+            not isinstance(result, dict)
+            or not all(self._nonempty_string(result, field) for field in ("ui", "name"))
+            or not self._valid_semantic_types(result.get("semanticTypes"))
+        ):
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.GET_CONCEPT,
+                http_status=http_status,
+            ) from None
         stypes = result.get("semanticTypes") or []
-        stype_names = [
-            str(s.get("name") if isinstance(s, dict) else s) for s in stypes
-        ]
+        stype_names = self._semantic_type_names(stypes)
         name = str(result.get("name") or "")
         ui = str(result.get("ui") or cui.upper())
         return Concept(
@@ -192,19 +378,39 @@ class UMLSClient:
 
     async def get_definitions(self, cui: str) -> list[str]:
         """Return definition strings for a CUI (may be empty)."""
+        path = f"/content/{self.version}/CUI/{cui.upper()}/definitions"
         try:
-            data = await self._get(f"/content/{self.version}/CUI/{cui.upper()}/definitions")
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
+            data, http_status = await self._get(
+                path,
+                operation=ProviderOperation.GET_DEFINITIONS,
+                allow_not_found=True,
+            )
+        except ProviderError as exc:
+            if exc.failure.category == FailureCategory.NOT_FOUND:
                 return []
             raise
-        results = data.get("result") or []
-        if results == "NONE" or not results:
+        results = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.GET_DEFINITIONS,
+            http_status=http_status,
+        )
+        if results == "NONE" or results == []:
             return []
+        if not isinstance(results, list) or not all(
+            isinstance(item, dict)
+            and isinstance(item.get("value"), str)
+            and bool(item["value"].strip())
+            for item in results
+        ):
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.GET_DEFINITIONS,
+                http_status=http_status,
+            ) from None
         defs: list[str] = []
         for item in results:
-            if isinstance(item, dict) and item.get("value"):
-                defs.append(str(item["value"]))
+            defs.append(item["value"])
         return defs
 
     async def get_atoms(
@@ -223,22 +429,62 @@ class UMLSClient:
             params["ttys"] = "PT"
 
         path = f"/content/{self.version}/CUI/{cui.upper()}/atoms"
-        data = await self._get(path, params)
-        results = data.get("result") or []
-        if results == "NONE" or not results:
+        data, http_status = await self._get(
+            path,
+            params,
+            operation=ProviderOperation.GET_ATOMS,
+            allow_not_found=True,
+        )
+        results = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.GET_ATOMS,
+            http_status=http_status,
+        )
+        if results == "NONE" or results == []:
             return []
+        if not isinstance(results, list):
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.GET_ATOMS,
+                http_status=http_status,
+            ) from None
 
         codes: list[SourceCode] = []
         seen: set[tuple[str, str]] = set()
         for item in results:
-            if not isinstance(item, dict):
-                continue
+            if not isinstance(item, dict) or not all(
+                self._nonempty_string(item, field) for field in ("rootSource", "name")
+            ):
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.GET_ATOMS,
+                    http_status=http_status,
+                ) from None
+            if (
+                (item.get("termType") is not None and not isinstance(item.get("termType"), str))
+                or not self._valid_boolean(item.get("obsolete"))
+                or (item.get("code") is not None and not isinstance(item.get("code"), str))
+                or (
+                    item.get("sourceConcept") is not None
+                    and not isinstance(item.get("sourceConcept"), str)
+                )
+            ):
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.GET_ATOMS,
+                    http_status=http_status,
+                ) from None
             source = str(item.get("rootSource") or "")
             code = _code_from_atom_url(item.get("code"))
             if not code:
                 code = _code_from_atom_url(item.get("sourceConcept"))
-            if not code or not source:
-                continue
+            if not code:
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.GET_ATOMS,
+                    http_status=http_status,
+                ) from None
             key = (source, code)
             if key in seen:
                 continue
@@ -318,12 +564,9 @@ class UMLSClient:
         # an empty list means "no codes in those SABs", not "show every vocabulary".
 
         if preferred_name is None:
-            try:
-                concept = await self.get_cui(cui)
-                preferred_name = concept.pref_label
-                semantic_types = concept.semantic_types
-            except httpx.HTTPError:
-                pass
+            concept = await self.get_cui(cui)
+            preferred_name = concept.pref_label
+            semantic_types = concept.semantic_types
 
         return CrosswalkResult(
             query=query,
@@ -336,8 +579,34 @@ class UMLSClient:
     async def get_source(self, source: str, code: str) -> Concept:
         """Fetch a source-asserted identifier."""
         sab = self.normalize_sab(source)
-        data = await self._get(f"/content/{self.version}/source/{sab}/{code}")
-        result = data.get("result") or data
+        path = f"/content/{self.version}/source/{sab}/{code}"
+        data, http_status = await self._get(
+            path,
+            operation=ProviderOperation.GET_SOURCE,
+            ontology=sab,
+            allow_not_found=True,
+        )
+        result = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.GET_SOURCE,
+            http_status=http_status,
+            ontology=sab,
+        )
+        if (
+            not isinstance(result, dict)
+            or not all(self._nonempty_string(result, field) for field in ("ui", "name"))
+            or not (
+                self._valid_boolean(result.get("obsolete"))
+                and (result.get("concepts") is None or isinstance(result.get("concepts"), str))
+            )
+        ):
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.GET_SOURCE,
+                http_status=http_status,
+                ontology=sab,
+            ) from None
         name = str(result.get("name") or "")
         ui = str(result.get("ui") or code)
         obsolete = result.get("obsolete")
@@ -360,14 +629,43 @@ class UMLSClient:
 
     async def parents(self, source: str, code: str) -> list[HierarchyNode]:
         sab = self.normalize_sab(source)
-        data = await self._get(f"/content/{self.version}/source/{sab}/{code}/parents")
-        results = data.get("result") or []
-        if results == "NONE" or not results:
+        path = f"/content/{self.version}/source/{sab}/{code}/parents"
+        data, http_status = await self._get(
+            path,
+            operation=ProviderOperation.PARENTS,
+            ontology=sab,
+            allow_not_found=True,
+        )
+        results = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.PARENTS,
+            http_status=http_status,
+            ontology=sab,
+        )
+        if results == "NONE" or results == []:
             return []
+        if not isinstance(results, list):
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.PARENTS,
+                http_status=http_status,
+                ontology=sab,
+            ) from None
         nodes: list[HierarchyNode] = []
         for item in results:
-            if not isinstance(item, dict):
-                continue
+            if (
+                not isinstance(item, dict)
+                or not self._nonempty_string(item, "ui")
+                or ("name" in item and not isinstance(item["name"], str))
+                or ("rootSource" in item and not isinstance(item["rootSource"], str))
+            ):
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.PARENTS,
+                    http_status=http_status,
+                    ontology=sab,
+                ) from None
             ui = str(item.get("ui") or "")
             nodes.append(
                 HierarchyNode(
@@ -382,14 +680,43 @@ class UMLSClient:
 
     async def children(self, source: str, code: str) -> list[HierarchyNode]:
         sab = self.normalize_sab(source)
-        data = await self._get(f"/content/{self.version}/source/{sab}/{code}/children")
-        results = data.get("result") or []
-        if results == "NONE" or not results:
+        path = f"/content/{self.version}/source/{sab}/{code}/children"
+        data, http_status = await self._get(
+            path,
+            operation=ProviderOperation.CHILDREN,
+            ontology=sab,
+            allow_not_found=True,
+        )
+        results = self._result(
+            data,
+            path=path,
+            operation=ProviderOperation.CHILDREN,
+            http_status=http_status,
+            ontology=sab,
+        )
+        if results == "NONE" or results == []:
             return []
+        if not isinstance(results, list):
+            raise self._invalid(
+                path,
+                operation=ProviderOperation.CHILDREN,
+                http_status=http_status,
+                ontology=sab,
+            ) from None
         nodes: list[HierarchyNode] = []
         for item in results:
-            if not isinstance(item, dict):
-                continue
+            if (
+                not isinstance(item, dict)
+                or not self._nonempty_string(item, "ui")
+                or ("name" in item and not isinstance(item["name"], str))
+                or ("rootSource" in item and not isinstance(item["rootSource"], str))
+            ):
+                raise self._invalid(
+                    path,
+                    operation=ProviderOperation.CHILDREN,
+                    http_status=http_status,
+                    ontology=sab,
+                ) from None
             ui = str(item.get("ui") or "")
             nodes.append(
                 HierarchyNode(

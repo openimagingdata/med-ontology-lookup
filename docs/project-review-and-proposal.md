@@ -90,8 +90,8 @@ authentication, pagination, and failure handling belong behind it.
 
 The offline engineering baseline is healthy:
 
-- all 50 tests pass on Python 3.11, 3.12, 3.13, and 3.14;
-- Pyright reports no errors;
+- all 121 tests pass on Python 3.11, 3.12, 3.13, and 3.14;
+- the locked `ty` check reports no errors;
 - the wheel and source distribution build and pass metadata validation;
 - the CLI runs when installed from the built wheel; and
 - the resolved dependency set has no known reported vulnerabilities at review time.
@@ -376,8 +376,8 @@ Outcome: the repository has one executable plan and a visible backlog.
 - Turn the findings in this document into small GitHub issues with acceptance criteria.
 - Keep the implementation plan under `docs/plans/` current as work lands.
 - Decide which behavior changes require a minor release rather than a patch release.
-- Keep `CHANGELOG.md` limited to released, externally visible differences; use `DEV_LOG.md` for
-  engineering decisions and investigation notes.
+- Keep `CHANGELOG.md` limited to externally visible differences, using `Unreleased` until those
+  changes ship; use `DEV_LOG.md` for engineering decisions and investigation notes.
 
 Exit criteria: every immediate item has an issue, dependency order, and verification method.
 
@@ -386,10 +386,10 @@ Exit criteria: every immediate item has an issue, dependency order, and verifica
 Outcome: every change receives reproducible offline checks while provider failures stop becoming
 misleading fallback results.
 
-- Add offline CI for supported Python versions, tests, the chosen and pinned Ruff policy, Pyright,
+- Add offline CI for supported Python versions, tests, the chosen and pinned Ruff policy, `ty`,
   build validation, and package smoke installation.
-- Record the same commands in contributor documentation and keep them runnable from a clean
-  checkout.
+- Expose the same commands through the repository Taskfile and contributor documentation, and keep
+  them runnable from a clean checkout.
 - Add a typed, operation-aware provider error taxonomy and fallback policy.
 - Preserve provider, operation, sanitized endpoint, HTTP status, and known status origin.
 - Propagate unexpected programming exceptions and cancellation.

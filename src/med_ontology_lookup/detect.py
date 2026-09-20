@@ -38,15 +38,11 @@ _SNOMED_CODE_RE = re.compile(r"^\d{6,18}$")
 _LOINC_RE = re.compile(r"^\d{1,7}-\d{1,2}$")
 
 # Generic compact codes (letter-leading): RID-style already handled; CPT/ICD-like
-_LETTER_COMPACT_CODE_RE = re.compile(
-    r"^[A-Z]{1,10}[:_\-.]?\d+[A-Z0-9.\-]*$", re.IGNORECASE
-)
+_LETTER_COMPACT_CODE_RE = re.compile(r"^[A-Z]{1,10}[:_\-.]?\d+[A-Z0-9.\-]*$", re.IGNORECASE)
 
 # Digit-leading compact codes with an internal separator (not pure integers)
 # e.g. 8867-4, 12345.6 — pure digit strings are handled as SNOMED above
-_DIGIT_COMPACT_CODE_RE = re.compile(
-    r"^\d+[A-Z0-9]*[.\-][A-Z0-9.\-]+$", re.IGNORECASE
-)
+_DIGIT_COMPACT_CODE_RE = re.compile(r"^\d+[A-Z0-9]*[.\-][A-Z0-9.\-]+$", re.IGNORECASE)
 
 
 def detect_input(query: str) -> DetectedInput:
@@ -67,7 +63,9 @@ def detect_input(query: str) -> DetectedInput:
         return DetectedInput(InputKind.CUI, raw.upper(), "UMLS")
 
     if _RADLEX_RE.match(raw):
-        return DetectedInput(InputKind.CODE, raw.upper() if raw.upper().startswith("RID") else raw, "RADLEX")
+        return DetectedInput(
+            InputKind.CODE, raw.upper() if raw.upper().startswith("RID") else raw, "RADLEX"
+        )
 
     fma = _FMA_PREFIX_RE.match(raw)
     if fma:

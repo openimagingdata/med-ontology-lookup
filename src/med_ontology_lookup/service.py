@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Literal
+from typing import Literal, Self
 
 import httpx
 
@@ -15,19 +14,32 @@ from med_ontology_lookup.config import (
     Settings,
     get_settings,
 )
-from med_ontology_lookup.http_util import format_http_error
 from med_ontology_lookup.detect import InputKind, detect_input
+from med_ontology_lookup.errors import (
+    ProviderAggregateError,
+    ProviderError,
+    ProviderFailureError,
+    flatten_failures,
+    gather_provider_calls,
+)
 from med_ontology_lookup.models import (
     Backend,
     Concept,
     CrosswalkResult,
+    FailureCategory,
     HierarchyNode,
+    ProviderFailure,
     SearchHit,
     SearchResults,
 )
 from med_ontology_lookup.semantic_types import hit_matches_types, resolve_semantic_types
 
 BackendChoice = Literal["bioportal", "umls", "both", "auto"]
+_FALLBACK_CATEGORIES = frozenset({FailureCategory.NOT_FOUND, FailureCategory.UNSUPPORTED_OPERATION})
+
+
+def _allows_fallback(exc: ProviderFailureError) -> bool:
+    return all(failure.category in _FALLBACK_CATEGORIES for failure in exc.failures)
 
 
 class OntologyLookup:
@@ -65,7 +77,7 @@ class OntologyLookup:
             self._bioportal._owns_client = False
             self._umls._owns_client = False
 
-    async def __aenter__(self) -> OntologyLookup:
+    async def __aenter__(self) -> Self:
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=self.settings.http_timeout)
             self._bioportal._client = self._http
@@ -172,11 +184,7 @@ class OntologyLookup:
             # When the user names ontologies, map them to UMLS SABs.
             # When using defaults, leave sabs unrestricted so general UMLS CUIs appear
             # alongside BioPortal source hits.
-            umls_sabs = (
-                [self._umls.normalize_sab(o) for o in ontologies]
-                if ontologies
-                else None
-            )
+            umls_sabs = [self._umls.normalize_sab(o) for o in ontologies] if ontologies else None
             tasks.append(
                 (
                     Backend.UMLS,
@@ -193,30 +201,30 @@ class OntologyLookup:
         if not tasks:
             raise ValueError("No usable backend for search with current API keys.")
 
-        results_lists = await asyncio.gather(
-            *[t[1] for t in tasks], return_exceptions=True
-        )
+        results_lists = await gather_provider_calls([task[1] for task in tasks])
         merged: list[SearchHit] = []
         primary_backend: Backend | None = None
-        errors: list[tuple[Backend, BaseException]] = []
+        errors: list[ProviderFailureError] = []
+        failures: list[ProviderFailure] = []
         warnings: list[str] = []
+        successes = 0
         for (b, _), result in zip(tasks, results_lists, strict=True):
-            if isinstance(result, BaseException):
-                errors.append((b, result))
-                warnings.append(f"{b.value}: {format_http_error(result)}")
+            if isinstance(result, ProviderFailureError):
+                errors.append(result)
+                failures.extend(result.failures)
+                warnings.extend(failure.summary() for failure in result.failures)
                 continue
+            successes += 1
             primary_backend = primary_backend or b
             if isinstance(result, SearchResults):
                 merged.extend(result.results)
                 warnings.extend(result.warnings)
+                failures.extend(result.failures)
             else:
-                merged.extend(result)  # type: ignore[arg-type]
+                merged.extend(result)
 
-        if not merged and errors:
-            if len(errors) == 1:
-                raise errors[0][1]
-            parts = [f"{b.value}: {format_http_error(e)}" for b, e in errors]
-            raise RuntimeError("All search backends failed: " + "; ".join(parts))
+        if errors and successes == 0:
+            raise ProviderAggregateError(flatten_failures(errors))
 
         # Deduplicate by (backend, concept_id)
         seen: set[tuple[str, str]] = set()
@@ -237,9 +245,7 @@ class OntologyLookup:
 
         # Interleave by ontology so RADLEX/FMA/LOINC/SNOMED/UMLS all appear.
         preferred_order = list(onts) + ["UMLS"]
-        ordered = self._interleave_by_ontology(
-            unique, limit=limit, preferred_order=preferred_order
-        )
+        ordered = self._interleave_by_ontology(unique, limit=limit, preferred_order=preferred_order)
 
         return SearchResults(
             query=query,
@@ -247,6 +253,7 @@ class OntologyLookup:
             results=ordered,
             backend=primary_backend if len(backends) == 1 else None,
             warnings=warnings,
+            failures=failures,
         )
 
     @staticmethod
@@ -318,8 +325,8 @@ class OntologyLookup:
         if use_bp and ont and ont.upper() not in {"UMLS"}:
             try:
                 return await self._bioportal.get_class(ont.upper(), detected.value)
-            except httpx.HTTPStatusError:
-                if not use_umls:
+            except ProviderError as exc:
+                if not use_umls or not _allows_fallback(exc):
                     raise
 
         if use_umls:
@@ -395,8 +402,8 @@ class OntologyLookup:
                 if direction == "parents":
                     return await self._bioportal.parents(bp_ont, code)
                 return await self._bioportal.children(bp_ont, code)
-            except httpx.HTTPStatusError:
-                if not prefer_umls:
+            except ProviderError as exc:
+                if not prefer_umls or not _allows_fallback(exc):
                     raise
 
         if prefer_umls:
@@ -426,7 +433,9 @@ class OntologyLookup:
         if detected.kind == InputKind.CODE and detected.ontology_hint:
             try:
                 return await self.get(detected.value, ontology=detected.ontology_hint)
-            except (httpx.HTTPError, ValueError):
+            except ProviderError as exc:
+                if not _allows_fallback(exc):
+                    raise
                 # Fall back to search if direct get fails
                 return await self.search(
                     detected.value,

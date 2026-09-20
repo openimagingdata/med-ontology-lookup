@@ -11,7 +11,13 @@ from med_ontology_lookup.clients.bioportal import (
     _exact_first_preserve_order,
     _short_code,
 )
-from med_ontology_lookup.models import Backend, SearchHit
+from med_ontology_lookup.errors import ProviderAggregateError, ProviderError
+from med_ontology_lookup.models import (
+    Backend,
+    FailureCategory,
+    SearchHit,
+    StatusOrigin,
+)
 
 BASE = "https://data.bioontology.org"
 
@@ -125,9 +131,10 @@ async def test_class_exists_raises_on_auth_and_rate_limit(client: BioPortalClien
         return_value=httpx.Response(429, json={"errors": ["rate limited"]})
     )
     async with client:
-        with pytest.raises(httpx.HTTPStatusError) as exc:
+        with pytest.raises(ProviderError) as exc:
             await client._class_exists("RADLEX", iri)
-    assert exc.value.response.status_code == 429
+    assert exc.value.failure.http_status == 429
+    assert exc.value.failure.category == FailureCategory.RATE_LIMITED
 
 
 @respx.mock
@@ -264,3 +271,152 @@ async def test_parents_resolves_short_code(client: BioPortalClient):
         nodes = await client.parents("RADLEX", short)
     assert len(nodes) == 1
     assert nodes[0].pref_label == "hepatic duct"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_search_rejects_invalid_json(client: BioPortalClient):
+    respx.get(f"{BASE}/search").mock(return_value=httpx.Response(200, text="not-json"))
+    async with client:
+        with pytest.raises(ProviderError) as caught:
+            await client.search("x", ontologies=["RADLEX"])
+    assert caught.value.failure.category == FailureCategory.INVALID_JSON
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["search", "class_probe"])
+async def test_content_decoding_error_is_typed(operation: str):
+    def raise_decoding_error(request: httpx.Request) -> httpx.Response:
+        raise httpx.DecodingError("invalid content encoding", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(raise_decoding_error)) as transport:
+        client = BioPortalClient(api_key="test-key", base_url=BASE, client=transport)
+        with pytest.raises(ProviderError) as caught:
+            if operation == "search":
+                await client.search("x", ontologies=["RADLEX"])
+            else:
+                await client._class_exists("RADLEX", "RID1")
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"collection": {}},
+        {"collection": ["not-an-object"]},
+        {"collection": [{"@id": "RID1", "prefLabel": "x", "links": {}}]},
+    ],
+)
+async def test_search_rejects_invalid_success_shapes(client: BioPortalClient, payload: object):
+    respx.get(f"{BASE}/search").mock(return_value=httpx.Response(200, json=payload))
+    async with client:
+        with pytest.raises(ProviderError) as caught:
+            await client.search("x", ontologies=["RADLEX"])
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_search_preserves_non_200_success_status_on_invalid_shape(
+    client: BioPortalClient,
+):
+    respx.get(f"{BASE}/search").mock(return_value=httpx.Response(206, json={}))
+    async with client:
+        with pytest.raises(ProviderError) as caught:
+            await client.search("x", ontologies=["RADLEX"])
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+    assert caught.value.failure.http_status == 206
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_class_probe_rejects_invalid_success_shape(client: BioPortalClient):
+    respx.get(url__regex=rf"{BASE}/ontologies/RADLEX/classes/.*").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    async with client:
+        with pytest.raises(ProviderError) as caught:
+            await client._class_exists("RADLEX", "RID1")
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_class_probe_accepts_non_200_success(client: BioPortalClient):
+    iri = "http://www.radlex.org/RID/RID1"
+    respx.get(f"{BASE}/ontologies/RADLEX/classes/{quote(iri, safe='')}").mock(
+        return_value=httpx.Response(206, json={"@id": iri, "prefLabel": "finding"})
+    )
+    async with client:
+        assert await client._class_exists("RADLEX", iri) is True
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_hierarchy_rejects_malformed_success_shape(client: BioPortalClient):
+    iri = "http://www.radlex.org/RID/RID1"
+    respx.get(f"{BASE}/ontologies/RADLEX/classes/{quote(iri, safe='')}/parents").mock(
+        return_value=httpx.Response(
+            200,
+            json={"collection": [{"@id": "http://www.radlex.org/RID/RID0", "prefLabel": []}]},
+        )
+    )
+    async with client:
+        with pytest.raises(ProviderError) as caught:
+            await client.parents("RADLEX", iri)
+    assert caught.value.failure.category == FailureCategory.INVALID_RESPONSE
+    assert caught.value.failure.operation.value == "parents"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_custom_endpoint_404_is_not_classified_as_absence():
+    proxy = "https://proxy.example.test/v1/connectors/bioportal"
+    client = BioPortalClient(api_key="key", base_url=proxy)
+    iri = "http://www.radlex.org/RID/RID1"
+    respx.get(url__regex=rf"{proxy}/ontologies/RADLEX/classes/.*").mock(
+        return_value=httpx.Response(404, json={"errors": ["route missing"]})
+    )
+    async with client:
+        with pytest.raises(ProviderError) as caught:
+            await client.get_class("RADLEX", iri)
+    assert caught.value.failure.category == FailureCategory.HTTP_ERROR
+    assert caught.value.failure.status_origin == StatusOrigin.UNKNOWN
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_balanced_search_preserves_valid_empty_partial_success(
+    client: BioPortalClient,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("ontologies") == "SNOMEDCT":
+            return httpx.Response(503, json={"errors": ["unavailable"]})
+        return httpx.Response(200, json={"collection": [], "totalCount": 0})
+
+    respx.get(f"{BASE}/search").mock(side_effect=handler)
+    async with client:
+        result = await client.search_balanced("x", ontologies=["RADLEX", "SNOMEDCT"])
+    assert result.results == []
+    assert [failure.ontology for failure in result.failures] == ["SNOMEDCT"]
+    assert result.failures[0].category == FailureCategory.UNAVAILABLE
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_balanced_search_preserves_every_failure_when_all_fail(
+    client: BioPortalClient,
+):
+    respx.get(f"{BASE}/search").mock(
+        return_value=httpx.Response(503, json={"errors": ["unavailable"]})
+    )
+    async with client:
+        with pytest.raises(ProviderAggregateError) as caught:
+            await client.search_balanced("x", ontologies=["RADLEX", "SNOMEDCT"])
+    assert [failure.ontology for failure in caught.value.failures] == [
+        "RADLEX",
+        "SNOMEDCT",
+    ]

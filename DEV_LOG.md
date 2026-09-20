@@ -86,3 +86,49 @@ src/med_ontology_lookup/
 - Moved offline CI alongside typed provider-failure handling as parallel foundation work; separated live contracts and release publication into later explicit checkpoints.
 - Tightened delegated authentication so final outgoing requests cannot inherit client-side provider credentials and every paginated request remains under its Aperture connector prefix.
 - Created tracking issue [#1](https://github.com/openimagingdata/med-ontology-lookup/issues/1) and dependency-ordered implementation issues [#2–#12](https://github.com/openimagingdata/med-ontology-lookup/issues?q=is%3Aissue%20state%3Aopen%20sort%3Acreated-asc).
+
+### 2026-09-14 — typed provider failures and fallback policy
+
+- Added a public adapter-to-facade failure contract carrying provider, operation, category,
+  sanitized endpoint, optional HTTP status, conservative status origin, and ontology context.
+- Limited fallback to typed `not_found` and `unsupported_operation` outcomes. Authentication,
+  authorization, rate-limit, upstream, transport, and malformed-response failures remain visible.
+- Retained canonical provider `404` handling for resource endpoints as a narrow compatibility rule,
+  while custom endpoint `404` responses remain unknown-origin HTTP failures. Kept the BioPortal
+  bare-code `400` probe only for its bounded parsed `not a valid IRI` signal.
+- Replaced broad concurrent exception collection with a helper that records only typed provider
+  failures, counts valid empty calls as successes, and propagates unexpected exceptions and task
+  cancellation after cleaning up sibling tasks.
+- Added minimum success-payload validation beside each adapter mapper, structured partial failures
+  on search results, and credential-safe CLI JSON errors. The executable plan incorporates two
+  rounds of independent `gpt-6-astra` review.
+
+### 2026-09-14 — adopt `ty` for reproducible type checks
+
+- Replaced the undocumented local Pyright invocation with `ty>=0.0.80` in the locked development
+  dependencies and made `uv run ty check` the documented repository check.
+- Kept exact tool versions in `uv.lock` rather than duplicating them as direct constraints in
+  `pyproject.toml`; upgrades remain explicit and independently verified.
+- Confirmed that current `uv` also provides an experimental `uv check` command backed by `ty`, but
+  it does not yet orchestrate Ruff, pytest, builds, and smoke checks. Nox was rejected as too much
+  overlapping environment machinery for this project.
+- Added a thin Taskfile over locked `uv` commands. `task check` is the normal lock/format/lint/type/
+  test entry point; `task test-matrix` covers Python 3.11–3.14; `task verify` adds the matrix and
+  package build. Development tools now use the standardized PEP 735 `dev` dependency group, which
+  `uv` syncs by default, with exact Ruff and `ty` versions resolved in `uv.lock`.
+
+### 2026-09-17 — validate PR #14 review findings
+
+- Reproduced and fixed loss of the observed successful HTTP status during BioPortal and UMLS
+  payload validation; validation failures now retain any actual 2xx status rather than synthesizing
+  `200`.
+- Made BioPortal class probes accept every HTTPX-defined successful 2xx response and normalized
+  mixed string/object UMLS semantic-type lists member by member.
+- Removed duplicated table output for a singular provider failure while retaining per-failure
+  details for aggregate errors.
+- Rejected the proposed HTTPX catch widening: in HTTPX 0.28.1, `DecodingError` inherits from
+  `RequestError`, which both adapters already catch. Adapter-level regressions now lock down that
+  typed `invalid_response` translation.
+- Corrected the current test count and automation wording. Deliberately retained the concise
+  `Unreleased` changelog entry and clarified that changelog sections hold shipped or pending-release
+  user-visible changes, while engineering detail belongs in this development log.

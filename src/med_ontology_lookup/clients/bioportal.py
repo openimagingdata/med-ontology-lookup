@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 from urllib.parse import quote
 
 import httpx
 
-from med_ontology_lookup.config import DEFAULT_BIOPORTAL_ONTOLOGIES, Settings, get_settings
-from med_ontology_lookup.http_util import format_http_error
+from med_ontology_lookup.config import (
+    BIOPORTAL_BASE_URL,
+    DEFAULT_BIOPORTAL_ONTOLOGIES,
+    Settings,
+    get_settings,
+)
+from med_ontology_lookup.errors import (
+    ProviderAggregateError,
+    ProviderFailureError,
+    decode_json,
+    error_for_request,
+    error_for_status,
+    flatten_failures,
+    gather_provider_calls,
+    invalid_response,
+)
 from med_ontology_lookup.models import (
     Backend,
     Concept,
     HierarchyNode,
+    ProviderOperation,
     SearchHit,
     SearchResults,
 )
@@ -108,12 +123,13 @@ class BioPortalClient:
         self._settings = settings or get_settings()
         self.api_key = api_key if api_key is not None else self._settings.bioportal_key()
         self.base_url = (base_url or self._settings.bioportal_base_url).rstrip("/")
+        self._uses_canonical_route = self.base_url == BIOPORTAL_BASE_URL
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout if timeout is not None else self._settings.http_timeout
         self._resolve_cache: dict[tuple[str, str], str] = {}
 
-    async def __aenter__(self) -> BioPortalClient:
+    async def __aenter__(self) -> Self:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout)
         return self
@@ -133,20 +149,116 @@ class BioPortalClient:
     def _require_client(self) -> httpx.AsyncClient:
         if self._client is None:
             raise ValueError(
-                "HTTP client not initialized. Use `async with BioPortalClient()` "
-                "or pass client=..."
+                "HTTP client not initialized. Use `async with BioPortalClient()` or pass client=..."
             )
         return self._client
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"apikey token={self._require_key()}"}
 
-    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        operation: ProviderOperation,
+        ontology: str | None = None,
+        allow_not_found: bool = False,
+    ) -> tuple[object, int]:
         client = self._require_client()
         url = f"{self.base_url}{path}"
-        response = await client.get(url, params=params or {}, headers=self._headers())
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = await client.get(url, params=params or {}, headers=self._headers())
+        except httpx.RequestError as exc:
+            translated = error_for_request(
+                exc,
+                provider=Backend.BIOPORTAL,
+                operation=operation,
+                endpoint=url,
+                ontology=ontology,
+            )
+            if translated is None:
+                raise
+            raise translated from None
+        if not response.is_success:
+            raise error_for_status(
+                response,
+                provider=Backend.BIOPORTAL,
+                operation=operation,
+                ontology=ontology,
+                allow_canonical_not_found=allow_not_found and self._uses_canonical_route,
+            ) from None
+        return (
+            decode_json(
+                response,
+                provider=Backend.BIOPORTAL,
+                operation=operation,
+                ontology=ontology,
+            ),
+            response.status_code,
+        )
+
+    def _invalid(
+        self,
+        path: str,
+        *,
+        operation: ProviderOperation,
+        http_status: int,
+        ontology: str | None = None,
+    ) -> ProviderFailureError:
+        return invalid_response(
+            provider=Backend.BIOPORTAL,
+            operation=operation,
+            endpoint=f"{self.base_url}{path}",
+            ontology=ontology,
+            http_status=http_status,
+        )
+
+    @staticmethod
+    def _valid_class_item(item: object) -> bool:
+        if not isinstance(item, dict):
+            return False
+        if not (
+            isinstance(item.get("@id"), str)
+            and bool(item["@id"].strip())
+            and isinstance(item.get("prefLabel"), str)
+            and bool(item["prefLabel"].strip())
+        ):
+            return False
+        for field in ("synonym", "definition", "semanticType", "cui"):
+            value = item.get(field)
+            if value is not None and not (
+                isinstance(value, str)
+                or (isinstance(value, list) and all(isinstance(member, str) for member in value))
+            ):
+                return False
+        obsolete = item.get("obsolete")
+        return obsolete is None or isinstance(obsolete, bool)
+
+    @classmethod
+    def _valid_search_item(cls, item: object) -> bool:
+        if not cls._valid_class_item(item):
+            return False
+        assert isinstance(item, dict)
+        links = item.get("links")
+        return (
+            isinstance(links, dict)
+            and isinstance(links.get("ontology"), str)
+            and bool(links["ontology"].strip())
+            and (links.get("ui") is None or isinstance(links.get("ui"), str))
+        )
+
+    @staticmethod
+    def _valid_hierarchy_item(item: object) -> bool:
+        if not isinstance(item, dict):
+            return False
+        concept_id = item.get("@id")
+        label = item.get("prefLabel")
+        return (
+            isinstance(concept_id, str)
+            and bool(concept_id.strip())
+            and (label is None or isinstance(label, str))
+        )
 
     def _hit_from_item(self, item: dict[str, Any], query: str = "") -> SearchHit:
         links = _links_dict(item)
@@ -230,9 +342,39 @@ class BioPortalClient:
         if also_search_properties:
             params["also_search_properties"] = "true"
 
-        data = await self._get("/search", params)
-        collection = data.get("collection") or []
-        hits = [self._hit_from_item(item, query=query) for item in collection if isinstance(item, dict)]
+        ontology = onts[0] if len(onts) == 1 else None
+        data, http_status = await self._get(
+            "/search",
+            params,
+            operation=ProviderOperation.SEARCH,
+            ontology=ontology,
+        )
+        if not isinstance(data, dict) or not isinstance(data.get("collection"), list):
+            raise self._invalid(
+                "/search",
+                operation=ProviderOperation.SEARCH,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        collection = data["collection"]
+        total_count = data.get("totalCount")
+        if total_count is not None and (
+            not isinstance(total_count, int) or isinstance(total_count, bool)
+        ):
+            raise self._invalid(
+                "/search",
+                operation=ProviderOperation.SEARCH,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        if not all(self._valid_search_item(item) for item in collection):
+            raise self._invalid(
+                "/search",
+                operation=ProviderOperation.SEARCH,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        hits = [self._hit_from_item(item, query=query) for item in collection]
         return SearchResults(
             query=query,
             total_count=data.get("totalCount"),
@@ -289,8 +431,6 @@ class BioPortalClient:
         vocabulary (e.g. SNOMEDCT) can completely crowd out RADLEX/FMA/LOINC
         even when those have exact matches. Querying per-ontology fixes that.
         """
-        import asyncio
-
         onts = list(ontologies) if ontologies is not None else list(self.DEFAULT_ONTOLOGIES)
         if not onts:
             hits = await self.search_all(
@@ -317,8 +457,8 @@ class BioPortalClient:
 
         # Fetch enough from each ontology to fill a balanced page.
         n_each = per_ontology or max(5, (max_results + len(onts) - 1) // len(onts) + 2)
-        results = await asyncio.gather(
-            *[
+        results = await gather_provider_calls(
+            [
                 self.search_all(
                     query,
                     max_results=n_each,
@@ -327,22 +467,23 @@ class BioPortalClient:
                     semantic_types=semantic_types,
                 )
                 for ont in onts
-            ],
-            return_exceptions=True,
+            ]
         )
 
         by_ont: dict[str, list[SearchHit]] = {ont: [] for ont in onts}
-        errors: list[BaseException] = []
+        errors: list[ProviderFailureError] = []
         warnings: list[str] = []
+        successes = 0
         for ont, result in zip(onts, results, strict=True):
-            if isinstance(result, BaseException):
+            if isinstance(result, ProviderFailureError):
                 errors.append(result)
-                warnings.append(f"{ont}: {format_http_error(result)}")
+                warnings.extend(failure.summary() for failure in result.failures)
                 continue
-            by_ont[ont] = result  # type: ignore[assignment]
+            successes += 1
+            by_ont[ont] = result
 
-        if errors and not any(by_ont.values()):
-            raise errors[0]
+        if errors and successes == 0:
+            raise ProviderAggregateError(flatten_failures(errors))
 
         # Round-robin across ontologies; exact matches first, preserving API order.
         for ont in onts:
@@ -375,6 +516,7 @@ class BioPortalClient:
             results=merged,
             backend=Backend.BIOPORTAL,
             warnings=warnings,
+            failures=flatten_failures(errors),
         )
 
     def _candidate_iris(self, ontology: str, class_id: str) -> list[str]:
@@ -403,21 +545,66 @@ class BioPortalClient:
         client = self._require_client()
         encoded = quote(class_id, safe="")
         url = f"{self.base_url}/ontologies/{ontology}/classes/{encoded}"
-        response = await client.get(
-            url,
-            params={
-                "include": "prefLabel",
-                "display_context": "false",
-                "display_links": "false",
-            },
-            headers=self._headers(),
-        )
-        if response.status_code == 200:
+        try:
+            response = await client.get(
+                url,
+                params={
+                    "include": "prefLabel",
+                    "display_context": "false",
+                    "display_links": "false",
+                },
+                headers=self._headers(),
+            )
+        except httpx.RequestError as exc:
+            translated = error_for_request(
+                exc,
+                provider=Backend.BIOPORTAL,
+                operation=ProviderOperation.RESOLVE_CLASS,
+                endpoint=url,
+                ontology=ontology,
+            )
+            if translated is None:
+                raise
+            raise translated from None
+        if response.is_success:
+            data = decode_json(
+                response,
+                provider=Backend.BIOPORTAL,
+                operation=ProviderOperation.RESOLVE_CLASS,
+                ontology=ontology,
+            )
+            if not self._valid_class_item(data):
+                raise self._invalid(
+                    f"/ontologies/{ontology}/classes/{encoded}",
+                    operation=ProviderOperation.RESOLVE_CLASS,
+                    http_status=response.status_code,
+                    ontology=ontology,
+                ) from None
             return True
-        if response.status_code in {400, 404}:
+        if (
+            response.status_code == 400
+            and self._uses_canonical_route
+            and not _looks_like_iri(class_id)
+        ):
+            data = decode_json(
+                response,
+                provider=Backend.BIOPORTAL,
+                operation=ProviderOperation.RESOLVE_CLASS,
+                ontology=ontology,
+            )
+            errors = data.get("errors") if isinstance(data, dict) else None
+            if isinstance(errors, list) and any(
+                isinstance(item, str) and "not a valid iri" in item.casefold() for item in errors
+            ):
+                return False
+        if response.status_code == 404 and self._uses_canonical_route:
             return False
-        response.raise_for_status()
-        return False
+        raise error_for_status(
+            response,
+            provider=Backend.BIOPORTAL,
+            operation=ProviderOperation.RESOLVE_CLASS,
+            ontology=ontology,
+        ) from None
 
     async def resolve_class_id(self, ontology: str, class_id: str) -> str:
         """Resolve a short code or IRI to a BioPortal class id (usually a full IRI).
@@ -455,7 +642,11 @@ class BioPortalClient:
         for hit in results.results:
             short = hit.code.casefold()
             iri = hit.concept_id.rstrip("/")
-            if short == needle or iri.casefold().endswith("/" + needle) or iri.casefold().endswith("#" + needle):
+            if (
+                short == needle
+                or iri.casefold().endswith("/" + needle)
+                or iri.casefold().endswith("#" + needle)
+            ):
                 self._resolve_cache[cache_key] = hit.concept_id
                 return hit.concept_id
             raw_item = hit.raw or {}
@@ -474,40 +665,65 @@ class BioPortalClient:
         """Fetch a class by ontology acronym and class id or full IRI."""
         resolved = await self.resolve_class_id(ontology, class_id)
         encoded = quote(resolved, safe="")
-        data = await self._get(
+        data, http_status = await self._get(
             f"/ontologies/{ontology}/classes/{encoded}",
             {
                 "include": self.CLASS_INCLUDE,
                 "display_context": "false",
                 "display_links": "true",
             },
+            operation=ProviderOperation.GET_CONCEPT,
+            ontology=ontology,
+            allow_not_found=True,
         )
-        if not isinstance(data, dict):
-            raise ValueError(f"Unexpected response for {ontology}/{class_id}")
+        if not self._valid_class_item(data):
+            raise self._invalid(
+                f"/ontologies/{ontology}/classes/{encoded}",
+                operation=ProviderOperation.GET_CONCEPT,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        assert isinstance(data, dict)
         return self._concept_from_item(data, ontology=ontology)
 
     async def parents(self, ontology: str, class_id: str) -> list[HierarchyNode]:
         resolved = await self.resolve_class_id(ontology, class_id)
         encoded = quote(resolved, safe="")
-        data = await self._get(
+        data, http_status = await self._get(
             f"/ontologies/{ontology}/classes/{encoded}/parents",
             {
                 "include": "prefLabel",
                 "display_context": "false",
                 "display_links": "false",
             },
+            operation=ProviderOperation.PARENTS,
+            ontology=ontology,
+            allow_not_found=True,
         )
-        items = data if isinstance(data, list) else data.get("collection") or []
-        return [
-            self._node_from_item(item, ontology)
-            for item in items
-            if isinstance(item, dict)
-        ]
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict) and isinstance(data.get("collection"), list):
+            items = data["collection"]
+        else:
+            raise self._invalid(
+                f"/ontologies/{ontology}/classes/{encoded}/parents",
+                operation=ProviderOperation.PARENTS,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        if not all(self._valid_hierarchy_item(item) for item in items):
+            raise self._invalid(
+                f"/ontologies/{ontology}/classes/{encoded}/parents",
+                operation=ProviderOperation.PARENTS,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        return [self._node_from_item(item, ontology) for item in items]
 
     async def children(self, ontology: str, class_id: str) -> list[HierarchyNode]:
         resolved = await self.resolve_class_id(ontology, class_id)
         encoded = quote(resolved, safe="")
-        data = await self._get(
+        data, http_status = await self._get(
             f"/ontologies/{ontology}/classes/{encoded}/children",
             {
                 "include": "prefLabel",
@@ -515,13 +731,29 @@ class BioPortalClient:
                 "display_links": "false",
                 "pagesize": 100,
             },
+            operation=ProviderOperation.CHILDREN,
+            ontology=ontology,
+            allow_not_found=True,
         )
-        items = data if isinstance(data, list) else data.get("collection") or []
-        return [
-            self._node_from_item(item, ontology)
-            for item in items
-            if isinstance(item, dict)
-        ]
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict) and isinstance(data.get("collection"), list):
+            items = data["collection"]
+        else:
+            raise self._invalid(
+                f"/ontologies/{ontology}/classes/{encoded}/children",
+                operation=ProviderOperation.CHILDREN,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        if not all(self._valid_hierarchy_item(item) for item in items):
+            raise self._invalid(
+                f"/ontologies/{ontology}/classes/{encoded}/children",
+                operation=ProviderOperation.CHILDREN,
+                http_status=http_status,
+                ontology=ontology,
+            ) from None
+        return [self._node_from_item(item, ontology) for item in items]
 
 
 def _exact_first_preserve_order(hits: list[SearchHit]) -> list[SearchHit]:

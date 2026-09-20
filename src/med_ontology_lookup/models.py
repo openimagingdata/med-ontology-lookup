@@ -5,7 +5,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from med_ontology_lookup.http_util import sanitize_endpoint
 
 
 class Backend(str, Enum):
@@ -13,6 +15,75 @@ class Backend(str, Enum):
 
     BIOPORTAL = "bioportal"
     UMLS = "umls"
+
+
+class ProviderOperation(str, Enum):
+    """Remote provider operation that produced a failure."""
+
+    SEARCH = "search"
+    RESOLVE_CLASS = "resolve_class"
+    GET_CONCEPT = "get_concept"
+    GET_DEFINITIONS = "get_definitions"
+    GET_ATOMS = "get_atoms"
+    GET_SOURCE = "get_source"
+    PARENTS = "parents"
+    CHILDREN = "children"
+
+
+class FailureCategory(str, Enum):
+    """Stable category for a provider failure."""
+
+    NOT_FOUND = "not_found"
+    UNSUPPORTED_OPERATION = "unsupported_operation"
+    AUTHENTICATION = "authentication"
+    AUTHORIZATION = "authorization"
+    LICENSING = "licensing"
+    RATE_LIMITED = "rate_limited"
+    TIMEOUT = "timeout"
+    CONNECTION = "connection"
+    UNAVAILABLE = "unavailable"
+    INVALID_JSON = "invalid_json"
+    INVALID_RESPONSE = "invalid_response"
+    TRANSPORT = "transport"
+    HTTP_ERROR = "http_error"
+
+
+class StatusOrigin(str, Enum):
+    """Known origin of an HTTP status, when it can be established."""
+
+    PROVIDER = "provider"
+    PROXY = "proxy"
+    UNKNOWN = "unknown"
+
+
+class ProviderFailure(BaseModel):
+    """Credential-safe facts about one failed provider operation."""
+
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
+
+    provider: Backend
+    operation: ProviderOperation
+    category: FailureCategory
+    endpoint: str
+    http_status: int | None = None
+    status_origin: StatusOrigin = StatusOrigin.UNKNOWN
+    ontology: str | None = None
+
+    @field_validator("endpoint")
+    @classmethod
+    def _sanitize_endpoint(cls, value: str) -> str:
+        return sanitize_endpoint(value)
+
+    def summary(self) -> str:
+        """Return a concise message derived only from safe fields."""
+        label = f"{self.provider.value} {self.operation.value}: {self.category.value}"
+        if self.http_status is not None:
+            label += f" (HTTP {self.http_status})"
+        if self.ontology:
+            label += f" [{self.ontology}]"
+        if self.endpoint:
+            label += f" at {self.endpoint}"
+        return label
 
 
 class SearchHit(BaseModel):
@@ -45,6 +116,10 @@ class SearchResults(BaseModel):
     warnings: list[str] = Field(
         default_factory=list,
         description="Partial-failure notes (one backend or ontology failed; others succeeded)",
+    )
+    failures: list[ProviderFailure] = Field(
+        default_factory=list,
+        description="Typed provider failures when another attempted search succeeded",
     )
 
 
