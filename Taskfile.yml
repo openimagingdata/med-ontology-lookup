@@ -9,11 +9,16 @@ tasks:
   check:
     desc: Check the lockfile, formatting, lint, types, and tests
     cmds:
+      - task: static
+      - task: test
+
+  static:
+    desc: Check the lockfile, formatting, lint, and types
+    cmds:
       - task: lock
       - task: format-check
       - task: lint
       - task: typecheck
-      - task: test
 
   lock:
     desc: Verify that uv.lock matches pyproject.toml
@@ -51,11 +56,26 @@ tasks:
 
   build:
     desc: Build the wheel and source distribution
-    cmd: uv build
+    cmd: uv run --locked -- uv build --no-build-isolation --clear
+
+  metadata-check:
+    desc: Validate built distribution metadata
+    cmd: uv run --locked twine check dist/*
+
+  wheel-smoke:
+    desc: Install the built wheel in isolation and smoke-test its import and CLI
+    cmd: uv run --locked python scripts/wheel_smoke.py
+
+  package-check:
+    desc: Build and validate distributions, then smoke-test the installed wheel
+    cmds:
+      - task: build
+      - task: metadata-check
+      - task: wheel-smoke
 
   verify:
-    desc: Run standard checks, the Python matrix, and package builds
+    desc: Run static checks, the Python matrix, and package verification
     cmds:
-      - task: check
+      - task: static
       - task: test-matrix
-      - task: build
+      - task: package-check

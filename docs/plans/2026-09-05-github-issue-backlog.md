@@ -29,6 +29,10 @@ Tracking: [#1 — Deliver trustworthy lookup contracts and delegated authenticat
 10. [#11 — Bounded provider diagnostics](https://github.com/openimagingdata/med-ontology-lookup/issues/11).
 11. [#12 — Hardened release preparation and explicit publication checkpoint](https://github.com/openimagingdata/med-ontology-lookup/issues/12).
 
+Added on 2026-09-20: [#15 — Bounded, credential-safe caching for provider reads](https://github.com/openimagingdata/med-ontology-lookup/issues/15).
+Persistent caching follows #4 and #9 so its request identity reflects the final provider-selection
+and endpoint/authentication contracts. Coordinate pagination and partial-result behavior with #6.
+
 ## Completion notes
 
 The tracking issue and eleven focused issues were created and checked on GitHub. Their bodies are

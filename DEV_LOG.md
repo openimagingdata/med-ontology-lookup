@@ -132,3 +132,25 @@ src/med_ontology_lookup/
 - Corrected the current test count and automation wording. Deliberately retained the concise
   `Unreleased` changelog entry and clarified that changelog sections hold shipped or pending-release
   user-visible changes, while engineering detail belongs in this development log.
+
+### 2026-09-20 — offline CI and package verification
+
+- Added least-privilege GitHub Actions jobs for locked static checks, offline tests on Python
+  3.11–3.14, and clean distribution/installed-wheel verification through the Taskfile.
+- Pinned `actions/checkout`, `astral-sh/setup-uv`, and `go-task/setup-task` to immutable commit SHAs;
+  CI also selects exact uv and Task releases while Python development tools remain resolved by
+  `uv.lock`.
+- Split `task static` from active-interpreter tests and added `task package-check` for a clean
+  build, Twine metadata validation, isolated wheel import, and `molu --help` smoke testing.
+- Kept all required checks credential-free and mocked: live BioPortal, UMLS, and Aperture contracts
+  remain owned by the later opt-in live-check issue.
+- Added issue #15 for bounded, credential-safe persistent caching after backend and delegated
+  endpoint identity are stable.
+
+### 2026-10-02 — finalize offline CI
+
+- Resolved Hatchling and its build dependencies through `uv.lock`; package builds use the
+  synchronized development environment instead of resolving the backend again in isolation.
+- Replaced the wheel smoke commands with a script that installs hash-checked, locked runtime
+  dependencies in a temporary environment, then imports and invokes the wheel outside the checkout.
+- Validated workflow syntax with actionlint 1.7.12 and security with zizmor 1.30.1.
