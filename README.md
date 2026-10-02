@@ -170,15 +170,23 @@ The repository's check commands are collected in `Taskfile.yml`. With
 
 ```bash
 uv sync
-task check         # lockfile, format, lint, types, and current-Python tests
-task test-matrix   # tests on Python 3.11, 3.12, 3.13, and 3.14
-task verify        # standard checks, Python matrix, and package build
-task fix           # safe Ruff fixes and formatting
+task check          # static checks plus tests on the active Python
+task static         # lockfile, formatting, lint, and types (CI static job)
+task test-matrix    # tests on Python 3.11, 3.12, 3.13, and 3.14
+task package-check  # build, metadata, installed-wheel import, and CLI smoke
+task verify         # static checks, full Python matrix, and package verification
+task fix            # safe Ruff fixes and formatting
 ```
 
 Each task is a thin wrapper around a locked `uv` command; `task --list` shows the individual
-commands. The lockfile resolves the type checker and formatter/linter versions, so local and future
-automation runs can use the same versions while `pyproject.toml` expresses compatible lower bounds.
+commands. The lockfile resolves the type checker, formatter/linter, test, and package-validation
+versions, including Hatchling, while `pyproject.toml` expresses compatible lower bounds.
+Package verification installs the wheel with locked runtime dependencies in a fresh environment
+and checks its import and CLI from outside the checkout.
+
+GitHub Actions runs `task static` once, `task test` independently on Python 3.11–3.14, and
+`task package-check` once. These jobs use no provider credentials and make no live
+BioPortal, UMLS, or Aperture requests.
 
 Tests mock HTTP with `respx` (no live API keys required).
 

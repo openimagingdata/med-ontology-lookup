@@ -2,7 +2,7 @@
 
 **Review date:** 2026-09-03
 **Backlog review:** 2026-09-05
-**Status:** proposed direction
+**Status:** accepted direction; foundation work in progress
 
 ## Executive recommendation
 
@@ -65,7 +65,9 @@ The repository currently provides:
 - balanced, per-ontology BioPortal search;
 - semantic-type shorthand and strict/non-strict filtering;
 - short-code and IRI resolution for common BioPortal ontologies;
-- partial search warnings and credential redaction; and
+- typed provider failures, operation-aware fallback, structured partial search failures, and
+  credential redaction;
+- a locked `ty`/Ruff/pytest toolchain with a Taskfile and offline GitHub Actions checks; and
 - a portable agent skill under `skills/med-ontology-lookup/`.
 
 The architecture is appropriately small:
@@ -99,32 +101,18 @@ The offline engineering baseline is healthy:
 The current tests are especially useful around identifier detection, BioPortal class resolution,
 search balancing, semantic-type filtering, error redaction, and source-filter fidelity.
 
-### Immediate correctness and contract risks
+### Contract status and remaining risks
 
-#### 1. Provider failures can be mistaken for normal fallback
+#### 1. Provider failures and fallback now have a typed contract
 
-`OntologyLookup.get`, hierarchy operations, and `lookup` catch broad HTTP failures. A BioPortal
-authentication failure, rate limit, or server failure can therefore turn into a UMLS request or
-an exact search. During this review, a mocked BioPortal `401` was reproducibly converted into:
+Issue #3 established public, credential-safe provider failures and limited fallback to
+adapter-classified absence or unsupported operations. Authentication, authorization, rate limits,
+upstream failures, transport failures, invalid JSON, and structurally invalid successes remain
+visible. Valid partial searches retain structured failures, while unexpected programming
+exceptions and task cancellation propagate.
 
-- an empty `SearchResults` from `lookup`; and
-- a successful UMLS concept from `get` when both backends were configured.
-
-That behavior hides the event the caller most needs to understand. Fallback should occur only
-when the adapter classifies an operation-specific response as an expected absence or unsupported
-operation. HTTP status alone is insufficient: for example, a provider concept `404` may mean
-absence while an Aperture connector-path `404` is a routing failure. Authentication,
-authorization, licensing, rate limiting, timeouts, connection failures, upstream unavailability,
-invalid JSON, and structurally invalid successful responses must remain visible with provider,
-operation, sanitized endpoint, and status origin when it is known.
-
-Only typed, expected provider failures should become partial-result warnings. Unexpected
-programming exceptions and task cancellation must propagate rather than being converted into
-normal provider outcomes by broad exception handling or `gather(return_exceptions=True)`.
-
-This becomes more important with Aperture: `401` or `403` can mean missing tailnet identity or
-an Aperture grant, `429` can be an Aperture quota, and `502` can mean the proxy cannot reach the
-upstream. These must not trigger a different lookup operation.
+The remaining delegated-authentication work must preserve that contract without inferring whether
+an observed proxy status originated at Aperture or the upstream provider.
 
 #### 2. Hierarchy responses can silently truncate
 
@@ -190,24 +178,24 @@ explicit names before agents or downstream software depend on them.
 
 ### Delivery and maintenance gaps
 
-- There is no CI workflow, opt-in live provider smoke suite, branch protection, tag, GitHub
-  release, or PyPI publication.
+- Offline GitHub Actions now define locked static checks, tests on Python 3.11–3.14, and clean
+  package/installed-wheel verification through the same Taskfile commands used locally.
+- There is no opt-in live provider smoke suite, branch protection, tag, GitHub release, or PyPI
+  publication.
 - No live API test was possible during this review because the environment had no provider keys.
-- Exploratory statement coverage was 70% overall, with the CLI at 25%, the UMLS adapter at 67%,
-  and the facade at 69%. Coverage is evidence about missing scenarios, not a target by itself.
-- A current Ruff run reported 27 findings, but Ruff is not a declared development dependency and
-  the repository has no complete lint policy. The project should choose and pin its policy before
-  treating the count as a gate.
-- Development-only packages currently use a `dev` optional extra. Current uv guidance recommends
-  dependency groups for local development and testing; the `dev` group is synced by default.
-  [uv dependency guidance][uv-dependencies]
+- The 2026-09-03 exploratory statement-coverage run reported 70% overall, with the CLI at 25%, the
+  UMLS adapter at 67%, and the facade at 69%. Coverage is evidence about missing scenarios, not a
+  target by itself.
+- Development tools now use uv's standardized `dev` dependency group, are resolved by `uv.lock`,
+  and run through the repository Taskfile. [uv dependency guidance][uv-dependencies]
 - The CLI uses Typer's older function-default declarations. Current Typer documentation prefers
   `Annotated`, which also resolves the bulk of the Ruff `B008` friction.
   [Typer parameter guidance][typer-annotated]
 - The portable agent skill and broader documentation are not included in built distributions.
 
-The GitHub issue tracker is empty, so none of these risks or roadmap items currently has an owner,
-acceptance criteria, or visible state.
+Tracking issue [#1](https://github.com/openimagingdata/med-ontology-lookup/issues/1) owns the
+dependency-ordered backlog and links each remaining contract, delegated-authentication, caching,
+diagnostic, and release item.
 
 ## Authentication and endpoint proposal
 
@@ -435,6 +423,8 @@ provider keys.
   `apiKey`, including credentials inherited from supplied HTTP clients or endpoint URLs.
 - Keep every delegated request and pagination step under the configured Aperture connector prefix.
 - Preserve proxy-originated statuses in the typed error model.
+- Add bounded, persistent, credential-safe caching for validated idempotent provider reads after
+  endpoint and authentication identity are stable; never cache typed failures or malformed data.
 - Add separately gated, opt-in live provider and Aperture contract checks.
 - Add bounded `molu doctor` checks for configuration, reachability, observed statuses, provider
   release visibility, and licensing notices without claiming unobservable root causes.
