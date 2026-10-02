@@ -1,6 +1,6 @@
 # Offline CI and Reproducible Development Checks
 
-**Status:** implementation complete; awaiting hosted verification
+**Status:** complete
 **Date:** 2026-09-20
 **Issue:** [#2 — Add offline CI and reproducible development checks](https://github.com/openimagingdata/med-ontology-lookup/issues/2)
 
@@ -40,7 +40,7 @@ tests against the installed wheel rather than the source checkout.
   `CHANGELOG.md` only if installed-library or CLI behavior changes.
 - [x] Perform a final documentation review and reconcile README, the project review, `DEV_LOG.md`,
   and `CHANGELOG.md` with the implemented behavior.
-- [ ] After explicit commit authorization, publish the branch, open a pull request, inspect a
+- [x] After explicit commit authorization, publish the branch, open a pull request, inspect a
   successful GitHub Actions run, and mark this plan complete.
 
 ## Finalization on 2026-10-02
@@ -50,8 +50,9 @@ The user authorized completing, committing, publishing, and merging issue #2.
 - [x] Resolve Hatchling through `uv.lock` and build using the synchronized development environment.
 - [x] Install the wheel with locked runtime dependencies and verify its import outside the checkout.
 - [x] Validate workflow syntax and security, and rerun the affected checks.
-- [ ] Open the PR, inspect its review and all six hosted jobs, and address confirmed findings.
-- [ ] Record hosted verification, merge the PR, verify the main-branch run, and close the plan.
+- [x] Open the PR, inspect its review and all six hosted jobs, and address confirmed findings.
+- [x] Record hosted verification and close the implementation plan. Record the merge and main-branch
+  verification on the PR after delivery.
 
 ## Current decisions
 
@@ -107,3 +108,16 @@ The user authorized completing, committing, publishing, and merging issue #2.
 - On 2026-10-02, `task verify` passed again with the locked build backend and runtime dependencies.
   actionlint 1.7.12 and zizmor 1.30.1 passed. The wheel import resolved to the temporary environment's
   `site-packages`; both `molu --help` and `molu version` passed.
+
+## Hosted verification
+
+[PR #16](https://github.com/openimagingdata/med-ontology-lookup/pull/16) passed all six jobs in
+[CI run 37055872091](https://github.com/openimagingdata/med-ontology-lookup/actions/runs/37055872091).
+The logs confirm 121 tests on each of Python 3.11 through 3.14, successful static analysis,
+distribution metadata validation, an import from the temporary environment's `site-packages`, and
+successful CLI help and version checks on Python 3.14.
+
+Copilot reviewed the implementation on 2026-10-02, recommended approval, and reported no findings.
+
+After merge, verify the `main` push run and record its URL on the PR. Backend selection and provider
+readiness in issue #4 is the next implementation item.
